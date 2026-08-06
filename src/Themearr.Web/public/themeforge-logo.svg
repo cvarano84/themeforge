@@ -1,0 +1,14 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 560 112" role="img" aria-labelledby="title">
+  <title id="title">ThemeForge</title>
+  <defs>
+    <linearGradient id="ember" x1="38" y1="16" x2="72" y2="94" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#FFB020"/><stop offset="0.5" stop-color="#F97316"/><stop offset="1" stop-color="#D92D20"/>
+    </linearGradient>
+  </defs>
+  <g transform="translate(4 4) scale(.203125)">
+    <path d="M178 24h156c24 0 46 13 58 34l78 140c12 21 12 47 0 68L392 406c-12 21-34 34-58 34H178c-24 0-46-13-58-34L42 266a69 69 0 0 1 0-68L120 58c12-21 34-34 58-34Z" fill="#101828" stroke="#475467" stroke-width="12"/>
+    <path d="M275 80c13 58-37 75-20 126 10 30 39 38 50 64 10-47 31-78 56-103 24 59 38 111 22 163-18 60-66 101-127 101-75 0-132-54-132-128 0-74 52-110 86-159 19-27 28-52 31-79 22 10 36 29 34 15Z" fill="url(#ember)"/>
+    <path d="M145 306h48l24-58 38 125 39-159 29 92h44" fill="none" stroke="#FFF7E6" stroke-width="24" stroke-linecap="round" stroke-linejoin="round"/>
+  </g>
+  <text x="124" y="73" fill="#F9FAFB" font-family="Inter,Segoe UI,Arial,sans-serif" font-size="56" font-weight="750" letter-spacing="-2">Theme<tspan fill="#F79009">Forge</tspan></text>
+</svg>

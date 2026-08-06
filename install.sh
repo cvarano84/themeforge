@@ -1,0 +1,232 @@
+#!/usr/bin/env bash
+# ThemeForge fresh-install script
+# Called by the ProxmoxVE install script after system deps are in place.
+# Also suitable for any fresh Linux install where the .NET runtime is available.
+# Theme downloads run locally through pinned yt-dlp, Deno, and FFmpeg.
+#
+# Usage: bash install.sh [version]  (defaults to latest GitHub release)
+#
+# Environment variables:
+#   THEMEFORGE_BIND — address the API listens on (default: 127.0.0.1).
+#   THEMEARR_BIND   — deprecated compatibility alias.
+#                    Set to 0.0.0.0 to expose on the LAN (bearer auth still
+#                    required; no TLS — put a reverse proxy in front for WAN).
+set -euo pipefail
+
+GITHUB_REPO="Themearr/themearr"
+INSTALL_DIR="/opt/themearr"
+DATA_DIR="$INSTALL_DIR/data"
+SERVICE="themearr"
+SERVICE_USER="themearr"
+SERVICE_GROUP="themearr"
+UPDATER="/usr/local/bin/themearr-update"
+AUTH_ENV="$DATA_DIR/auth.env"
+SUDOERS_FILE="/etc/sudoers.d/themearr"
+if [[ -n "${THEMEARR_BIND:-}" ]]; then
+  echo "  [WARN]  THEMEARR_BIND is deprecated; use THEMEFORGE_BIND. The legacy alias remains supported." >&2
+fi
+BIND_ADDR="${THEMEFORGE_BIND:-${THEMEARR_BIND:-127.0.0.1}}"
+LISTEN_PORT=8080
+YTDLP_VERSION="2026.07.04"
+DENO_VERSION="2.9.4"
+
+info()  { echo "  [INFO]  $*"; }
+ok()    { echo "  [OK]    $*"; }
+error() { echo "  [ERROR] $*" >&2; exit 1; }
+
+# ── Resolve release asset ─────────────────────────────────────────────────────
+
+TARGET="${1:-latest}"
+if [[ "$TARGET" == "latest" ]]; then
+  RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/$GITHUB_REPO/releases/latest")
+else
+  RELEASE_JSON=$(curl -fsSL "https://api.github.com/repos/$GITHUB_REPO/releases/tags/$TARGET")
+fi
+
+TAG=$(echo "$RELEASE_JSON" | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+[[ -z "$TAG" ]] && error "Could not determine release tag from GitHub API"
+
+ARCH=$(uname -m)
+case "$ARCH" in
+  x86_64)  ARCH_SUFFIX="linux-x64"; YTDLP_ASSET="yt-dlp_linux"; DENO_ARCH="x86_64" ;;
+  aarch64) ARCH_SUFFIX="linux-arm64"; YTDLP_ASSET="yt-dlp_linux_aarch64"; DENO_ARCH="aarch64" ;;
+  *)       error "Unsupported architecture: $ARCH" ;;
+esac
+
+ASSET_URL=$(echo "$RELEASE_JSON" \
+  | grep '"browser_download_url"' \
+  | grep "${ARCH_SUFFIX}.tar.gz\"" \
+  | head -1 \
+  | cut -d'"' -f4)
+
+[[ -z "$ASSET_URL" ]] && error "No release asset found for $ARCH_SUFFIX in $TAG. Check that the GitHub release includes a $ARCH_SUFFIX.tar.gz artifact."
+
+# Published SHA-256 checksum asset (themearr-<arch>.tar.gz.sha256), if present.
+SHA_URL=$(echo "$RELEASE_JSON" \
+  | grep '"browser_download_url"' \
+  | grep "${ARCH_SUFFIX}.tar.gz.sha256" \
+  | head -1 \
+  | cut -d'"' -f4)
+
+info "Installing ThemeForge $TAG ($ARCH_SUFFIX)"
+
+# ── System dependencies ───────────────────────────────────────────────────────
+command -v apt-get &>/dev/null || error "Native installation requires a Debian-based system with apt-get. Install FFmpeg, ffprobe, CA certificates, yt-dlp ${YTDLP_VERSION}, and Deno ${DENO_VERSION} manually, then retry."
+info "Installing local downloader dependencies"
+apt-get update
+DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends ca-certificates curl ffmpeg unzip
+
+TOOLS_TMP=$(mktemp -d /tmp/themearr-tools.XXXXXX)
+trap 'rm -rf "$TOOLS_TMP"' EXIT
+curl -fsSLo "$TOOLS_TMP/yt-dlp" "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/${YTDLP_ASSET}"
+curl -fsSLo "$TOOLS_TMP/yt-sums" "https://github.com/yt-dlp/yt-dlp/releases/download/${YTDLP_VERSION}/SHA2-256SUMS"
+grep "  ${YTDLP_ASSET}$" "$TOOLS_TMP/yt-sums" | sed "s#  ${YTDLP_ASSET}\$#  $TOOLS_TMP/yt-dlp#" | sha256sum -c -
+install -o root -g root -m 0755 "$TOOLS_TMP/yt-dlp" /usr/local/bin/yt-dlp
+
+DENO_ASSET="deno-${DENO_ARCH}-unknown-linux-gnu.zip"
+curl -fsSLo "$TOOLS_TMP/$DENO_ASSET" "https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/${DENO_ASSET}"
+curl -fsSLo "$TOOLS_TMP/$DENO_ASSET.sha256sum" "https://github.com/denoland/deno/releases/download/v${DENO_VERSION}/${DENO_ASSET}.sha256sum"
+(cd "$TOOLS_TMP" && sha256sum -c "$DENO_ASSET.sha256sum" && unzip -q "$DENO_ASSET")
+install -o root -g root -m 0755 "$TOOLS_TMP/deno" /usr/local/bin/deno
+command -v ffprobe &>/dev/null || error "FFmpeg installed without ffprobe; install the complete ffmpeg package."
+ok "Local downloader ready: $(yt-dlp --version), $(deno --version | head -1), $(ffmpeg -version | head -1)"
+
+# ── Download and extract ──────────────────────────────────────────────────────
+
+mkdir -p "$INSTALL_DIR"
+mkdir -p "$DATA_DIR"
+
+TMP=$(mktemp /tmp/themearr-XXXXXX.tar.gz)
+info "Downloading release..."
+curl -fsSL "$ASSET_URL" -o "$TMP"
+
+# Verify the tarball against the published SHA-256 before extracting.
+if [[ -n "$SHA_URL" ]]; then
+  EXPECTED=$(curl -fsSL "$SHA_URL" | awk '{print $1}' | head -1)
+  ACTUAL=$(sha256sum "$TMP" | awk '{print $1}')
+  if [[ -z "$EXPECTED" || "$EXPECTED" != "$ACTUAL" ]]; then
+    rm -f "$TMP"
+    error "Checksum mismatch for $TAG ($ARCH_SUFFIX) — refusing to install. expected=$EXPECTED actual=$ACTUAL"
+  fi
+  ok "Checksum verified ($ACTUAL)"
+else
+  info "No published checksum for $TAG — skipping verification (older release)."
+fi
+
+tar -xzf "$TMP" -C "$INSTALL_DIR" --strip-components=1 --no-same-owner --no-same-permissions
+rm -f "$TMP"
+ok "Extracted to $INSTALL_DIR"
+
+echo "$TAG" > "$INSTALL_DIR/VERSION"
+
+# ── Service user ──────────────────────────────────────────────────────────────
+# Run as a dedicated non-root system user so a compromised API process cannot
+# touch the rest of the filesystem.
+
+if ! id -u "$SERVICE_USER" &>/dev/null; then
+  useradd --system --no-create-home --home-dir "$DATA_DIR" \
+          --shell /usr/sbin/nologin "$SERVICE_USER"
+  ok "Created system user '$SERVICE_USER'"
+fi
+
+chown -R "$SERVICE_USER:$SERVICE_GROUP" "$INSTALL_DIR"
+# Data dir holds the SQLite DB + auth token — lock down to the service user only.
+chmod 700 "$DATA_DIR"
+
+# ── Auth token ────────────────────────────────────────────────────────────────
+# Generated once at install time, loaded from an EnvironmentFile by systemd.
+# Preserve an existing token on re-run so clients don't need to be re-paired.
+
+if [[ ! -s "$AUTH_ENV" ]]; then
+  TOKEN=$(openssl rand -hex 32 2>/dev/null || head -c 32 /dev/urandom | xxd -p -c 64)
+  umask 077
+  printf 'THEMEFORGE_AUTH_TOKEN=%s\n' "$TOKEN" > "$AUTH_ENV"
+  chown "$SERVICE_USER:$SERVICE_GROUP" "$AUTH_ENV"
+  chmod 600 "$AUTH_ENV"
+  echo
+  echo "  ================================================================"
+  echo "  Access token (save this — it won't be shown again):"
+  echo "    $TOKEN"
+  echo "  Stored at: $AUTH_ENV"
+  echo "  ================================================================"
+  echo
+else
+  ok "Access token already exists at $AUTH_ENV — preserving"
+fi
+
+# ── Sudoers drop-in ───────────────────────────────────────────────────────────
+# The in-app updater (POST /api/update) needs to run the update helper as root.
+# Scope the sudo permission to exactly that one binary — nothing else.
+
+cat > "$SUDOERS_FILE" << EOF
+$SERVICE_USER ALL=(root) NOPASSWD: $UPDATER
+EOF
+chmod 440 "$SUDOERS_FILE"
+# Validate syntax — visudo -c returns non-zero on bad file, which aborts the install.
+visudo -cf "$SUDOERS_FILE" >/dev/null
+
+# ── Systemd service ───────────────────────────────────────────────────────────
+# Binds to loopback only by default. Put a reverse proxy (nginx/caddy) in front
+# for remote access — do NOT change this to 0.0.0.0 without adding TLS + auth.
+
+cat > /etc/systemd/system/themearr.service << EOF
+[Unit]
+Description=ThemeForge Service
+After=network.target
+
+[Service]
+Type=simple
+User=$SERVICE_USER
+Group=$SERVICE_GROUP
+WorkingDirectory=$INSTALL_DIR
+EnvironmentFile=$AUTH_ENV
+Environment="HOME=$DATA_DIR"
+Environment="XDG_CACHE_HOME=$DATA_DIR/.cache"
+Environment="DB_PATH=$DATA_DIR/themearr.db"
+Environment="THEMEFORGE_VERSION_FILE=$INSTALL_DIR/VERSION"
+Environment="ASPNETCORE_URLS=http://$BIND_ADDR:$LISTEN_PORT"
+ExecStart=/usr/bin/dotnet $INSTALL_DIR/Themearr.API.dll
+Restart=on-failure
+RestartSec=5
+# Light hardening — NoNewPrivileges is intentionally off so the updater's
+# sudo call still works. If you ever drop the in-app updater, switch it on.
+PrivateTmp=yes
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# ── Updater helper ─────────────────────────────────────────────────────────────
+# Fixed path so the in-app updater (UpdateService.cs) can always find it.
+
+# Prefer the deploy.sh shipped inside the installed (checksum-verified) release; only
+# fall back to fetching it, pinned to the installed tag — never the mutable main HEAD.
+cat > "$UPDATER" << 'UPDATER_EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+REPO="Themearr/themearr"
+LOCAL="/opt/themearr/deploy.sh"
+if [[ -f "$LOCAL" ]]; then
+  exec bash "$LOCAL"
+fi
+REF="$(cat /opt/themearr/VERSION 2>/dev/null || echo main)"
+[[ "$REF" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || REF="main"
+curl -fsSL "https://raw.githubusercontent.com/${REPO}/${REF}/deploy.sh" | bash
+UPDATER_EOF
+chmod 755 "$UPDATER"
+chown root:root "$UPDATER"
+
+systemctl daemon-reload
+systemctl enable --now "$SERVICE"
+ok "Service started — ThemeForge $TAG is running on $BIND_ADDR:$LISTEN_PORT"
+echo
+echo "  Local YouTube downloads are ready; no hosted converter account is required."
+echo "  Optional cookies for restricted videos can be configured with YTDLP_COOKIES_FILE."
+if [[ "$BIND_ADDR" == "0.0.0.0" ]]; then
+  echo "  [WARN]  Bound to 0.0.0.0 — the API is reachable from the LAN without TLS."
+  echo "          The bearer token is still required, but consider putting a reverse"
+  echo "          proxy (caddy/nginx) in front before exposing this to the internet."
+fi

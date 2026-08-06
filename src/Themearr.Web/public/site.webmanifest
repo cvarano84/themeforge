@@ -1,0 +1,18 @@
+{
+  "name": "ThemeForge",
+  "short_name": "ThemeForge",
+  "description": "Movie and TV theme automation by ChrisFlix Labs",
+  "id": "./",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0C111D",
+  "theme_color": "#101828",
+  "categories": ["entertainment", "music", "utilities"],
+  "icons": [
+    { "src": "icons/themeforge-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/themeforge-maskable-192.png", "sizes": "192x192", "type": "image/png", "purpose": "maskable" },
+    { "src": "icons/themeforge-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/themeforge-maskable-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

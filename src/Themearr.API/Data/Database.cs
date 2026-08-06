@@ -1,0 +1,1526 @@
+using System.Text.Json;
+using Microsoft.Data.Sqlite;
+using Themearr.API.Services;
+
+namespace Themearr.API.Data;
+
+public class Database(string dbPath)
+{
+    private SqliteConnection Open()
+    {
+        Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
+        var conn = new SqliteConnection($"Data Source={dbPath}");
+        conn.Open();
+        return conn;
+    }
+
+    public void Init()
+    {
+        using var conn = Open();
+        conn.Execute("""
+            CREATE TABLE IF NOT EXISTS movies (
+                id          TEXT PRIMARY KEY,
+                folderName  TEXT NOT NULL UNIQUE,
+                source      TEXT NOT NULL DEFAULT 'plex',
+                source_ref  TEXT,
+                title       TEXT NOT NULL,
+                year        INTEGER,
+                sourcePath  TEXT,
+                status      TEXT NOT NULL DEFAULT 'pending',
+                ignored     INTEGER NOT NULL DEFAULT 0,
+                synced_at   TEXT
+            )
+            """);
+        conn.Execute("""
+            CREATE TABLE IF NOT EXISTS shows (
+                id             TEXT PRIMARY KEY,
+                folderName     TEXT NOT NULL UNIQUE,
+                source         TEXT NOT NULL DEFAULT 'plex',
+                source_ref     TEXT,
+                title          TEXT NOT NULL,
+                year           INTEGER,
+                sourcePath     TEXT,
+                status         TEXT NOT NULL DEFAULT 'pending',
+                ignored        INTEGER NOT NULL DEFAULT 0,
+                synced_at      TEXT,
+                plex_has_theme INTEGER NOT NULL DEFAULT 0,
+                has_poster     INTEGER NOT NULL DEFAULT 1
+            )
+            """);
+        conn.Execute("""
+            CREATE TABLE IF NOT EXISTS settings (
+                key   TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+            """);
+        conn.Execute("""
+            CREATE TABLE IF NOT EXISTS theme_history (
+                id            INTEGER PRIMARY KEY AUTOINCREMENT,
+                movie_id      TEXT NOT NULL,
+                movie_title   TEXT NOT NULL,
+                movie_year    INTEGER,
+                theme_title   TEXT,
+                source_url    TEXT,
+                downloaded_at TEXT NOT NULL
+            )
+            """);
+        conn.Execute("""
+            CREATE TABLE IF NOT EXISTS arr_instances (
+                id                       TEXT PRIMARY KEY,
+                service_type             TEXT NOT NULL CHECK (service_type IN ('radarr', 'sonarr')),
+                name                     TEXT NOT NULL,
+                url                      TEXT NOT NULL,
+                api_key                  TEXT NOT NULL,
+                enabled                  INTEGER NOT NULL DEFAULT 1,
+                quality_label            TEXT,
+                priority                 INTEGER NOT NULL DEFAULT 0,
+                tags_json                TEXT NOT NULL DEFAULT '[]',
+                created_at               TEXT NOT NULL,
+                updated_at               TEXT NOT NULL,
+                last_successful_sync_at  TEXT,
+                health                   TEXT NOT NULL DEFAULT 'unknown',
+                health_detail            TEXT,
+                unresolved_path_count    INTEGER NOT NULL DEFAULT 0,
+                unresolved_path_sample   TEXT
+            )
+            """);
+        conn.Execute("CREATE UNIQUE INDEX IF NOT EXISTS ux_arr_instances_service_url ON arr_instances(service_type, url COLLATE NOCASE)");
+        MigrateMoviesTable(conn);
+        MigrateHistoryTable(conn);
+        MigrateHistoryTableV2(conn);
+        MigrateHistoryTableV3(conn);
+        MigrateMoviesTableV2(conn);
+        MigrateMoviesTableV3(conn);
+        MigrateMoviesTableV4(conn);
+        MigrateShowsTableV2(conn);
+        MigrateArrMediaColumns(conn);
+        MigrateLegacyArrInstances(conn);
+        MigrateLibrarySourceSettings(conn);
+        PruneDeadSettings(conn);
+    }
+
+    private static void MigrateArrMediaColumns(SqliteConnection conn)
+    {
+        AddColumns("movies");
+        AddColumns("shows");
+
+        void AddColumns(string table)
+        {
+            var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            conn.Query($"PRAGMA table_info({table})", r =>
+            {
+                while (r.Read()) columns.Add(r.GetString(1));
+            });
+            var additions = new (string Name, string Sql)[]
+            {
+                ("instance_id", "TEXT"),
+                ("remote_item_id", "TEXT"),
+                ("quality_label", "TEXT"),
+                ("tmdb_id", "TEXT"),
+                ("tvdb_id", "TEXT"),
+                ("imdb_id", "TEXT")
+            };
+            foreach (var (name, type) in additions)
+                if (!columns.Contains(name)) conn.Execute($"ALTER TABLE {table} ADD COLUMN {name} {type}");
+        }
+    }
+
+    /// <summary>
+    /// Converts the historical singleton credentials once. The old settings deliberately
+    /// remain during the compatibility window, but all new writes use arr_instances.
+    /// Matching by normalized service/url makes this idempotent even if a prior migration
+    /// completed before the process stopped.
+    /// </summary>
+    private static void MigrateLegacyArrInstances(SqliteConnection conn)
+    {
+        foreach (var service in new[] { "radarr", "sonarr" })
+        {
+            string url = "", key = "";
+            conn.Query("SELECT key, value FROM settings WHERE key IN (@urlKey, @keyKey)", r =>
+            {
+                while (r.Read())
+                {
+                    if (r.GetString(0) == $"{service}_url") url = NormalizeArrUrl(r.GetString(1));
+                    else key = r.GetString(1).Trim();
+                }
+            }, ("@urlKey", $"{service}_url"), ("@keyKey", $"{service}_api_key"));
+            if (url.Length == 0 || key.Length == 0) continue;
+
+            conn.Execute("""
+                INSERT OR IGNORE INTO arr_instances
+                    (id, service_type, name, url, api_key, enabled, quality_label, priority,
+                     tags_json, created_at, updated_at)
+                VALUES (@id, @service, @name, @url, @key, 1, NULL, 0, '[]', @now, @now)
+                """,
+                ("@id", Guid.NewGuid().ToString("N")), ("@service", service),
+                ("@name", service == "radarr" ? "Radarr" : "Sonarr"),
+                ("@url", url), ("@key", key), ("@now", DateTimeOffset.UtcNow.ToString("O")));
+        }
+    }
+
+    public static string NormalizeArrUrl(string? value) => (value ?? "").Trim().TrimEnd('/');
+
+    private static void MigrateShowsTableV2(SqliteConnection conn)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "PRAGMA table_info(shows)";
+        var columns = new HashSet<string>();
+        using (var r = cmd.ExecuteReader())
+            while (r.Read()) columns.Add(r.GetString(1));
+        if (!columns.Contains("has_poster"))
+            conn.Execute("ALTER TABLE shows ADD COLUMN has_poster INTEGER NOT NULL DEFAULT 1");
+    }
+
+    /// <summary>
+    /// Splits the historical movie-only source setting without breaking older clients.
+    /// The legacy key remains in place and is still read as a fallback by the movie
+    /// resolver during the compatibility period.
+    /// </summary>
+    private static void MigrateLibrarySourceSettings(SqliteConnection conn)
+    {
+        var legacy = "plex";
+        conn.Query("SELECT value FROM settings WHERE key = 'library_source'", r =>
+        {
+            if (r.Read()) legacy = r.GetString(0);
+        });
+        if (legacy is not ("plex" or "radarr")) legacy = "plex";
+
+        conn.Execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES ('movie_library_source', @v)",
+            ("@v", legacy));
+
+        var selectedShows = new Dictionary<string, List<string>>();
+        conn.Query("SELECT value FROM settings WHERE key = 'plex_selected_show_libraries'", r =>
+        {
+            if (!r.Read()) return;
+            try
+            {
+                selectedShows = JsonSerializer.Deserialize<Dictionary<string, List<string>>>(r.GetString(0)) ?? [];
+            }
+            catch (JsonException) { selectedShows = []; }
+        });
+        var initialShowSource = selectedShows.Values.Any(v => v.Count > 0) ? "plex" : "disabled";
+        conn.Execute(
+            "INSERT OR IGNORE INTO settings (key, value) VALUES ('show_library_source', @v)",
+            ("@v", initialShowSource));
+    }
+
+    // These keys were written on every server save but read by nothing -- the live
+    // server list (and its token) lives in `plex_servers`. plex_server_token in
+    // particular is a redundant copy of a Plex credential, so dropping them from
+    // legacy installs is a small hygiene win, not just tidiness.
+    private static void PruneDeadSettings(SqliteConnection conn) =>
+        conn.Execute(
+            "DELETE FROM settings WHERE key IN ('plex_server_url', 'plex_server_token', 'plex_server_name')");
+
+    private static void MigrateHistoryTable(SqliteConnection conn)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "PRAGMA table_info(theme_history)";
+        var columns = new HashSet<string>();
+        using (var r = cmd.ExecuteReader())
+            while (r.Read()) columns.Add(r.GetString(1));
+
+        if (!columns.Contains("theme_title"))
+            conn.Execute("ALTER TABLE theme_history ADD COLUMN theme_title TEXT");
+        if (!columns.Contains("source_url"))
+            conn.Execute("ALTER TABLE theme_history ADD COLUMN source_url TEXT");
+    }
+
+    // History predates TV shows, so every pre-existing row is a movie. The DEFAULT
+    // backfills them in place, which keeps GetThemeHistory's non-null read safe on
+    // upgraded installs without a separate UPDATE pass.
+    private static void MigrateHistoryTableV2(SqliteConnection conn)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "PRAGMA table_info(theme_history)";
+        var columns = new HashSet<string>();
+        using (var r = cmd.ExecuteReader())
+            while (r.Read()) columns.Add(r.GetString(1));
+
+        if (!columns.Contains("media_type"))
+            conn.Execute("ALTER TABLE theme_history ADD COLUMN media_type TEXT NOT NULL DEFAULT 'movie'");
+    }
+
+    private static void MigrateMoviesTableV2(SqliteConnection conn)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "PRAGMA table_info(movies)";
+        var columns = new HashSet<string>();
+        using (var r = cmd.ExecuteReader())
+            while (r.Read()) columns.Add(r.GetString(1));
+        if (!columns.Contains("ignored"))
+            conn.Execute("ALTER TABLE movies ADD COLUMN ignored INTEGER NOT NULL DEFAULT 0");
+    }
+
+    private static void MigrateMoviesTableV3(SqliteConnection conn)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "PRAGMA table_info(movies)";
+        var columns = new HashSet<string>();
+        using (var r = cmd.ExecuteReader())
+            while (r.Read()) columns.Add(r.GetString(1));
+        if (!columns.Contains("synced_at"))
+            conn.Execute("ALTER TABLE movies ADD COLUMN synced_at TEXT");
+    }
+
+    /// <summary>
+    /// Re-keys movies from Plex identifiers to their local folder.
+    ///
+    /// Runs in a transaction: the earlier rebuild-style migration in this file renames
+    /// the table before recreating it, so a failure partway would leave an install with
+    /// no movies table at all. SQLite supports transactional DDL, so a failure here rolls
+    /// back and the table is never left half-migrated — the upgrade can simply be retried
+    /// against intact data.
+    /// </summary>
+    private static void MigrateMoviesTableV4(SqliteConnection conn)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "PRAGMA table_info(movies)";
+        var columns = new HashSet<string>();
+        using (var r = cmd.ExecuteReader())
+            while (r.Read()) columns.Add(r.GetString(1));
+
+        if (columns.Contains("source") || !columns.Contains("plex_rating_key")) return;
+
+        // Everything below — including the read of the pre-migration rows — runs inside
+        // the transaction so there is a consistent snapshot of "movies" for the duration
+        // of the migration, not just for the destructive DDL that follows it.
+        using var tx = conn.BeginTransaction();
+
+        // old id → new id, for rewriting history afterwards
+        var remap = new Dictionary<string, string>(StringComparer.Ordinal);
+        var raw = new List<(string NewId, string Folder, string Source, string SourceRef,
+                             string Title, object? Year, string SourcePath, string Status,
+                             long Ignored, string? SyncedAt)>();
+
+        conn.Query(
+            "SELECT id, plex_server_id, plex_rating_key, title, year, sourcePath, folderName, status, ignored, synced_at FROM movies",
+            r =>
+            {
+                while (r.Read())
+                {
+                    var oldId = r.GetString(0);
+                    var folder = r.IsDBNull(6) ? "" : r.GetString(6);
+                    // Pre-resolution rows have no folder, so they cannot be acted on.
+                    if (string.IsNullOrEmpty(folder)) continue;
+
+                    var newId = MediaFolderId.For(folder);
+                    remap[oldId] = newId;
+
+                    raw.Add((newId, folder, "plex", $"{r.GetString(1)}:{r.GetString(2)}",
+                              r.GetString(3), r.IsDBNull(4) ? null : r.GetInt32(4),
+                              r.IsDBNull(5) ? "" : r.GetString(5),
+                              r.GetString(7), r.IsDBNull(8) ? 0L : r.GetInt64(8),
+                              r.IsDBNull(9) ? null : r.GetString(9)));
+                }
+            });
+
+        // Two folders differing only by trailing separators normalize to one id; the first
+        // row wins for the display fields (status is re-derived from disk regardless), but
+        // if any collapsed row was ignored the user's choice must not be silently dropped.
+        var ignoredByFolder = raw
+            .GroupBy(x => x.NewId, StringComparer.Ordinal)
+            .ToDictionary(g => g.Key, g => g.Any(x => x.Ignored != 0), StringComparer.Ordinal);
+
+        var seenIds = new HashSet<string>(StringComparer.Ordinal);
+        var rows = new List<(string NewId, string Folder, string Source, string SourceRef,
+                             string Title, object? Year, string SourcePath, string Status,
+                             long Ignored, string? SyncedAt)>();
+        foreach (var row in raw)
+        {
+            if (!seenIds.Add(row.NewId)) continue;
+            rows.Add(row with { Ignored = ignoredByFolder[row.NewId] ? 1L : 0L });
+        }
+
+        conn.Execute("ALTER TABLE movies RENAME TO movies_v4_old");
+        conn.Execute("""
+            CREATE TABLE movies (
+                id          TEXT PRIMARY KEY,
+                folderName  TEXT NOT NULL UNIQUE,
+                source      TEXT NOT NULL DEFAULT 'plex',
+                source_ref  TEXT,
+                title       TEXT NOT NULL,
+                year        INTEGER,
+                sourcePath  TEXT,
+                status      TEXT NOT NULL DEFAULT 'pending',
+                ignored     INTEGER NOT NULL DEFAULT 0,
+                synced_at   TEXT
+            )
+            """);
+
+        foreach (var row in rows)
+            conn.Execute("""
+                INSERT INTO movies (id, folderName, source, source_ref, title, year, sourcePath, status, ignored, synced_at)
+                VALUES (@id, @f, @src, @ref, @t, @y, @sp, @s, @ig, COALESCE(@sa, strftime('%Y-%m-%dT%H:%M:%fZ', 'now')))
+                """,
+                ("@id", row.NewId), ("@f", row.Folder), ("@src", row.Source), ("@ref", row.SourceRef),
+                ("@t", row.Title), ("@y", row.Year ?? (object)DBNull.Value), ("@sp", row.SourcePath),
+                ("@s", row.Status), ("@ig", row.Ignored), ("@sa", (object?)row.SyncedAt ?? DBNull.Value));
+
+        // History rows already carry title and year, so any that fail to remap still
+        // display correctly rather than going blank.
+        foreach (var (oldId, newId) in remap)
+            conn.Execute("UPDATE theme_history SET movie_id = @new WHERE movie_id = @old",
+                ("@new", newId), ("@old", oldId));
+
+        conn.Execute("DROP TABLE movies_v4_old");
+        tx.Commit();
+    }
+
+    private static void MigrateMoviesTable(SqliteConnection conn)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "PRAGMA table_info(movies)";
+        var columns = new HashSet<string>();
+        using (var r = cmd.ExecuteReader())
+            while (r.Read()) columns.Add(r.GetString(1));
+
+        // Already on the modern (source-keyed) schema. Post-V4 the table has neither
+        // plex_server_id nor plex_rating_key, so without this guard every subsequent
+        // startup would think a legacy migration is still needed and would rename the
+        // table, recreate the OLD schema, and copy only id/title/year/folderName/status —
+        // silently dropping ignored flags, source_ref (Plex identity), and sourcePath.
+        if (columns.Contains("source")) return;
+
+        var required = new[] { "id", "plex_server_id", "plex_rating_key", "title", "year", "sourcePath", "folderName", "status" };
+        if (required.All(c => columns.Contains(c))) return;
+
+        conn.Execute("ALTER TABLE movies RENAME TO movies_legacy");
+        conn.Execute("""
+            CREATE TABLE movies (
+                id              TEXT PRIMARY KEY,
+                plex_server_id  TEXT NOT NULL,
+                plex_rating_key TEXT NOT NULL,
+                title           TEXT NOT NULL,
+                year            INTEGER,
+                sourcePath      TEXT,
+                folderName      TEXT,
+                status          TEXT NOT NULL DEFAULT 'pending',
+                UNIQUE(plex_server_id, plex_rating_key)
+            )
+            """);
+        if (new[] { "id", "title", "year", "folderName", "status" }.All(c => columns.Contains(c)))
+        {
+            conn.Query("SELECT id, title, year, folderName, status FROM movies_legacy", r2 =>
+            {
+                while (r2.Read())
+                {
+                    var legacyId = r2.GetString(0);
+                    conn.Execute(
+                        "INSERT INTO movies (id, plex_server_id, plex_rating_key, title, year, sourcePath, folderName, status) VALUES (@id, 'legacy', @rk, @t, @y, '', @f, @s)",
+                        ("@id", $"legacy:{legacyId}"), ("@rk", legacyId),
+                        ("@t", r2.GetString(1)), ("@y", r2.IsDBNull(2) ? null : r2.GetInt32(2)),
+                        ("@f", r2.GetString(3)), ("@s", r2.GetString(4)));
+                }
+            });
+        }
+        conn.Execute("DROP TABLE movies_legacy");
+    }
+
+    // ── Settings ─────────────────────────────────────────────────────────────
+
+    public string GetSetting(string key, string @default = "")
+    {
+        using var conn = Open();
+        var result = @default;
+        conn.Query("SELECT value FROM settings WHERE key = @k",
+            r => { if (r.Read()) result = r.GetString(0); }, ("@k", key));
+        return result;
+    }
+
+    public void SetSetting(string key, string value)
+    {
+        using var conn = Open();
+        conn.Execute(
+            "INSERT INTO settings (key, value) VALUES (@k, @v) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            ("@k", key), ("@v", value));
+    }
+
+    public T GetJsonSetting<T>(string key, T @default)
+    {
+        var raw = GetSetting(key);
+        if (string.IsNullOrEmpty(raw)) return @default;
+        try { return JsonSerializer.Deserialize<T>(raw) ?? @default; }
+        catch { return @default; }
+    }
+
+    public void SetJsonSetting<T>(string key, T value) =>
+        SetSetting(key, JsonSerializer.Serialize(value));
+
+    // ── Arr instances ─────────────────────────────────────────────────────────────
+
+    public List<ArrInstance> GetArrInstances(string? serviceType = null, bool enabledOnly = false)
+    {
+        using var conn = Open();
+        var result = new List<ArrInstance>();
+        conn.Query("""
+            SELECT id, service_type, name, url, api_key, enabled, quality_label, priority,
+                   tags_json, created_at, updated_at, last_successful_sync_at, health,
+                   health_detail, unresolved_path_count, unresolved_path_sample
+            FROM arr_instances
+            WHERE (@service IS NULL OR service_type = @service)
+              AND (@enabledOnly = 0 OR enabled = 1)
+            ORDER BY service_type, priority, name, id
+            """, r =>
+        {
+            while (r.Read()) result.Add(ReadArrInstance(r));
+        }, ("@service", (object?)serviceType ?? DBNull.Value), ("@enabledOnly", enabledOnly ? 1 : 0));
+        return result;
+    }
+
+    private static void MigrateHistoryTableV3(SqliteConnection conn)
+    {
+        var columns = new HashSet<string>();
+        conn.Query("PRAGMA table_info(theme_history)", r =>
+        { while (r.Read()) columns.Add(r.GetString(1)); });
+        if (!columns.Contains("installation_results_json"))
+            conn.Execute("ALTER TABLE theme_history ADD COLUMN installation_results_json TEXT");
+    }
+
+    public ArrInstance? GetArrInstance(string id)
+    {
+        using var conn = Open();
+        ArrInstance? result = null;
+        conn.Query("""
+            SELECT id, service_type, name, url, api_key, enabled, quality_label, priority,
+                   tags_json, created_at, updated_at, last_successful_sync_at, health,
+                   health_detail, unresolved_path_count, unresolved_path_sample
+            FROM arr_instances WHERE id = @id
+            """, r => { if (r.Read()) result = ReadArrInstance(r); }, ("@id", id));
+        return result;
+    }
+
+    public bool ArrInstanceUrlExists(string serviceType, string url, string? excludingId = null)
+    {
+        using var conn = Open();
+        var found = false;
+        conn.Query("""
+            SELECT 1 FROM arr_instances
+            WHERE service_type = @service AND url = @url COLLATE NOCASE
+              AND (@exclude IS NULL OR id <> @exclude)
+            LIMIT 1
+            """, r => found = r.Read(), ("@service", serviceType), ("@url", NormalizeArrUrl(url)),
+            ("@exclude", (object?)excludingId ?? DBNull.Value));
+        return found;
+    }
+
+    public ArrInstance CreateArrInstance(
+        string serviceType, string name, string url, string apiKey, bool enabled,
+        string? qualityLabel, int priority, IReadOnlyList<string>? tags)
+    {
+        var id = Guid.NewGuid().ToString("N");
+        var now = DateTimeOffset.UtcNow.ToString("O");
+        using var conn = Open();
+        conn.Execute("""
+            INSERT INTO arr_instances
+                (id, service_type, name, url, api_key, enabled, quality_label, priority,
+                 tags_json, created_at, updated_at)
+            VALUES (@id, @service, @name, @url, @key, @enabled, @quality, @priority,
+                    @tags, @now, @now)
+            """, ("@id", id), ("@service", serviceType), ("@name", name.Trim()),
+            ("@url", NormalizeArrUrl(url)), ("@key", apiKey.Trim()), ("@enabled", enabled ? 1 : 0),
+            ("@quality", NullIfWhiteSpace(qualityLabel)), ("@priority", priority),
+            ("@tags", JsonSerializer.Serialize(NormalizeTags(tags))), ("@now", now));
+        return GetArrInstance(id)!;
+    }
+
+    public ArrInstance? UpdateArrInstance(
+        string id, string serviceType, string name, string url, string? apiKey, bool enabled,
+        string? qualityLabel, int priority, IReadOnlyList<string>? tags)
+    {
+        var current = GetArrInstance(id);
+        if (current is null) return null;
+        using var conn = Open();
+        conn.Execute("""
+            UPDATE arr_instances SET
+                service_type = @service, name = @name, url = @url,
+                api_key = CASE WHEN @replaceKey = 1 THEN @key ELSE api_key END,
+                enabled = @enabled, quality_label = @quality, priority = @priority,
+                tags_json = @tags, updated_at = @now
+            WHERE id = @id
+            """, ("@service", serviceType), ("@name", name.Trim()), ("@url", NormalizeArrUrl(url)),
+            ("@replaceKey", string.IsNullOrWhiteSpace(apiKey) ? 0 : 1), ("@key", (apiKey ?? "").Trim()),
+            ("@enabled", enabled ? 1 : 0), ("@quality", NullIfWhiteSpace(qualityLabel)),
+            ("@priority", priority), ("@tags", JsonSerializer.Serialize(NormalizeTags(tags))),
+            ("@now", DateTimeOffset.UtcNow.ToString("O")), ("@id", id));
+        return GetArrInstance(id);
+    }
+
+    public bool DeleteArrInstance(string id)
+    {
+        using var conn = Open();
+        var before = 0L;
+        conn.Query("SELECT COUNT(*) FROM arr_instances WHERE id = @id", r =>
+        { if (r.Read()) before = r.GetInt64(0); }, ("@id", id));
+        if (before == 0) return false;
+        conn.Execute("DELETE FROM arr_instances WHERE id = @id", ("@id", id));
+        return true;
+    }
+
+    public void RecordArrInstanceSync(
+        string id, bool success, string? detail, int unresolvedCount = 0, string? unresolvedSample = null)
+    {
+        using var conn = Open();
+        conn.Execute("""
+            UPDATE arr_instances SET
+                last_successful_sync_at = CASE WHEN @success = 1 THEN @now ELSE last_successful_sync_at END,
+                health = CASE WHEN @success = 1 THEN 'healthy' ELSE 'error' END,
+                health_detail = @detail,
+                unresolved_path_count = @count,
+                unresolved_path_sample = @sample,
+                updated_at = @now
+            WHERE id = @id
+            """, ("@success", success ? 1 : 0), ("@now", DateTimeOffset.UtcNow.ToString("O")),
+            ("@detail", NullIfWhiteSpace(detail)), ("@count", Math.Max(0, unresolvedCount)),
+            ("@sample", NullIfWhiteSpace(unresolvedSample)), ("@id", id));
+    }
+
+    public void RecordArrInstanceHealth(string id, bool healthy, string? detail)
+    {
+        using var conn = Open();
+        conn.Execute("""
+            UPDATE arr_instances
+            SET health = CASE WHEN @healthy = 1 THEN 'healthy' ELSE 'error' END,
+                health_detail = @detail,
+                updated_at = @now
+            WHERE id = @id
+            """, ("@healthy", healthy ? 1 : 0), ("@detail", NullIfWhiteSpace(detail)),
+            ("@now", DateTimeOffset.UtcNow.ToString("O")), ("@id", id));
+    }
+
+    private static ArrInstance ReadArrInstance(SqliteDataReader r)
+    {
+        List<string> tags;
+        try { tags = JsonSerializer.Deserialize<List<string>>(r.GetString(8)) ?? []; }
+        catch (JsonException) { tags = []; }
+        return new ArrInstance(
+            r.GetString(0), r.GetString(1), r.GetString(2), r.GetString(3), r.GetString(4),
+            r.GetInt64(5) != 0, r.IsDBNull(6) ? null : r.GetString(6), r.GetInt32(7), tags,
+            r.GetString(9), r.GetString(10), r.IsDBNull(11) ? null : r.GetString(11),
+            r.GetString(12), r.IsDBNull(13) ? null : r.GetString(13), r.GetInt32(14),
+            r.IsDBNull(15) ? null : r.GetString(15));
+    }
+
+    private static object NullIfWhiteSpace(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? DBNull.Value : value.Trim();
+
+    private static List<string> NormalizeTags(IReadOnlyList<string>? tags) =>
+        (tags ?? []).Select(t => t.Trim()).Where(t => t.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase).Take(50).ToList();
+
+    // ── Setup flags ───────────────────────────────────────────────────────────
+
+    public bool IsSetupComplete() => GetSetting("setup_complete") == "1";
+    public void MarkSetupComplete() => SetSetting("setup_complete", "1");
+
+    public void ResetAppState()
+    {
+        using var conn = Open();
+        conn.Execute("DELETE FROM movies");
+        conn.Execute("DELETE FROM shows");
+        conn.Execute("DELETE FROM arr_instances");
+        conn.Execute("DELETE FROM settings");
+    }
+
+    // ── Plex servers / libraries / paths ────────────────────────────────────
+
+    public List<Dictionary<string, object?>> GetPlexServers() =>
+        GetJsonSetting("plex_selected_servers", new List<Dictionary<string, object?>>());
+
+    public void SetPlexServers(List<Dictionary<string, object?>> servers) =>
+        SetJsonSetting("plex_selected_servers", servers);
+
+    // Same servers but with the Plex access token blanked, for echoing back in GET
+    // responses — the token is write-only and must never leave the server in JSON.
+    public List<Dictionary<string, object?>> GetPlexServersRedacted() =>
+        GetPlexServers()
+            .Select(srv =>
+            {
+                var copy = new Dictionary<string, object?>(srv) { ["token"] = "" };
+                return copy;
+            })
+            .ToList();
+
+    // Persists an incoming server list while preserving any stored token for a server
+    // whose incoming token is blank. Lets the UI load redacted servers and save them
+    // back without wiping the token it was never shown.
+    //
+    // The stored token is only ever carried forward when the incoming url matches the
+    // url it was stored against for that id. Matching on id alone would let a caller
+    // POST { id: <existing id>, url: <attacker host>, token: "" } and have the real
+    // token re-attached to a URL the server never issued it to — PlexLibrarySource.CheckAsync
+    // (reachable from the unauthenticated /health endpoint) would then hand the real
+    // token to that host. If the url doesn't match and no token was supplied, the server
+    // ends up with no token; the existing health check already reports that Plex
+    // rejected the credential and the user should sign in again, which is the correct,
+    // safe outcome here too.
+    public void SetPlexServersMergingTokens(List<Dictionary<string, object?>> incoming)
+    {
+        var storedTokens = GetPlexServersDict();
+        var merged = incoming.Select(srv =>
+        {
+            var copy = new Dictionary<string, object?>(srv);
+            var token = copy.GetValueOrDefault("token")?.ToString() ?? "";
+            if (string.IsNullOrEmpty(token))
+            {
+                var id = copy.GetValueOrDefault("id")?.ToString() ?? "";
+                var url = copy.GetValueOrDefault("url")?.ToString() ?? "";
+                if (!string.IsNullOrEmpty(id) && storedTokens.TryGetValue(id, out var s) &&
+                    !string.IsNullOrEmpty(s.Token) && UrlsMatch(url, s.Url))
+                    copy["token"] = s.Token;
+            }
+            return copy;
+        }).ToList();
+        SetPlexServers(merged);
+    }
+
+    /// <summary>
+    /// Points a stored Plex server at <paramref name="url"/> from an authenticated operator
+    /// action, keeping the existing token bound to the new address. Deliberately NOT
+    /// SetPlexServersMergingTokens: that path drops the token on a url change to stay safe for
+    /// the unauthenticated /health endpoint; this one is only reachable bearer-only, so it
+    /// rebinds directly. Returns false when no server has this id.
+    /// </summary>
+    public bool UpdatePlexServerUrl(string serverId, string url)
+    {
+        var servers = GetPlexServers();
+        var matched = false;
+        foreach (var srv in servers)
+        {
+            if ((srv.GetValueOrDefault("id")?.ToString() ?? "") != serverId) continue;
+            srv["url"] = url;
+            srv["urls"] = new List<string> { url };
+            matched = true;
+        }
+        if (matched) SetPlexServers(servers);
+        return matched;
+    }
+
+    // Ordinal comparison after trimming a single trailing slash — enough to treat
+    // "http://host:32400" and "http://host:32400/" as the same server without being
+    // lenient about anything that would actually change the destination (scheme, host,
+    // port, or case).
+    private static bool UrlsMatch(string a, string b) =>
+        string.Equals(a.TrimEnd('/'), b.TrimEnd('/'), StringComparison.Ordinal);
+
+    public Dictionary<string, List<string>> GetSelectedLibraries() =>
+        GetJsonSetting("plex_selected_libraries", new Dictionary<string, List<string>>());
+
+    public void SetSelectedLibraries(Dictionary<string, List<string>> libs) =>
+        SetJsonSetting("plex_selected_libraries", libs);
+
+    public Dictionary<string, List<string>> GetSelectedShowLibraries() =>
+        GetJsonSetting("plex_selected_show_libraries", new Dictionary<string, List<string>>());
+
+    public void SetSelectedShowLibraries(Dictionary<string, List<string>> libs) =>
+        SetJsonSetting("plex_selected_show_libraries", libs);
+
+    public string GetMovieLibrarySource()
+    {
+        var source = GetSetting("movie_library_source", "");
+        if (source is "plex" or "radarr" or "disabled") return source;
+        var legacy = GetSetting("library_source", "plex");
+        return legacy is "plex" or "radarr" ? legacy : "plex";
+    }
+
+    public string GetShowLibrarySource()
+    {
+        var source = GetSetting("show_library_source", "");
+        if (source is "plex" or "sonarr" or "disabled") return source;
+        return GetSelectedShowLibraries().Values.Any(v => v.Count > 0) ? "plex" : "disabled";
+    }
+
+    public List<Dictionary<string, string>> GetPathMappings() =>
+        GetJsonSetting("path_mappings", new List<Dictionary<string, string>>());
+
+    public void SetPathMappings(List<Dictionary<string, string>> mappings) =>
+        SetJsonSetting("path_mappings", mappings);
+
+    public Dictionary<string, (string Url, string Token)> GetPlexServersDict()
+    {
+        var dict = new Dictionary<string, (string, string)>();
+        foreach (var srv in GetPlexServers())
+        {
+            var id = srv.GetValueOrDefault("id")?.ToString() ?? "";
+            var url = srv.GetValueOrDefault("url")?.ToString() ?? "";
+            var token = srv.GetValueOrDefault("token")?.ToString() ?? "";
+            if (!string.IsNullOrEmpty(id) && !string.IsNullOrEmpty(url))
+                dict[id] = (url, token);
+        }
+        return dict;
+    }
+
+    public List<string> GetLibraryPaths()
+        => GetJsonSetting("library_paths", new List<string>());
+
+    /// <summary>
+    /// Every local root that an administrator explicitly authorized for media access.
+    /// Mapping targets do not grant authority: validation requires each target to be
+    /// inside one of these roots.
+    /// </summary>
+    public List<string> GetTrustedLibraryRoots() =>
+        GetJsonSetting("library_paths", new List<string>())
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Distinct(OperatingSystem.IsWindows()
+                ? StringComparer.OrdinalIgnoreCase
+                : StringComparer.Ordinal)
+            .ToList();
+
+    public void SetLibraryPaths(List<string> paths) =>
+        SetJsonSetting("library_paths", paths.Distinct().Where(p => !string.IsNullOrEmpty(p)).ToList());
+
+    // ── Movies ────────────────────────────────────────────────────────────────
+
+    public int UpsertMovies(IEnumerable<MovieRecord> movies)
+    {
+        var relocated = 0;
+        using var conn = Open();
+        using var tx = conn.BeginTransaction();
+        foreach (var m in movies)
+        {
+            if (string.IsNullOrEmpty(m.Folder)) continue;
+            var id = MediaFolderId.For(m.Folder);
+
+            string? oldId = null;
+            long oldIgnored = 0;
+            string oldStatus = "pending";
+            string? oldSyncedAt = null;
+            if (!string.IsNullOrEmpty(m.SourceRef))
+                conn.Query("SELECT id, ignored, status, synced_at FROM movies WHERE source = @src AND source_ref = @ref LIMIT 1", r =>
+                {
+                    if (!r.Read()) return;
+                    oldId = r.GetString(0);
+                    oldIgnored = r.GetInt64(1);
+                    oldStatus = r.GetString(2);
+                    oldSyncedAt = r.IsDBNull(3) ? null : r.GetString(3);
+                }, ("@src", m.Source), ("@ref", m.SourceRef));
+
+            if (oldId is not null && oldId != id)
+            {
+                conn.Execute("DELETE FROM movies WHERE id = @id", ("@id", oldId));
+                conn.Execute("UPDATE theme_history SET movie_id = @new WHERE movie_id = @old AND media_type = 'movie'",
+                    ("@new", id), ("@old", oldId));
+                relocated++;
+            }
+            conn.Execute("""
+                INSERT INTO movies (id, folderName, source, source_ref, title, year, sourcePath, status, ignored, synced_at,
+                                    instance_id, remote_item_id, quality_label, tmdb_id, imdb_id)
+                VALUES (@id, @f, @src, @ref, @t, @y, @sp, @status, @ignored,
+                        COALESCE(@synced, (SELECT synced_at FROM movies WHERE id = @id), strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                        @instance, @remote, @quality, @tmdb, @imdb)
+                ON CONFLICT(id) DO UPDATE SET
+                    folderName = excluded.folderName,
+                    source     = excluded.source,
+                    source_ref = excluded.source_ref,
+                    title      = excluded.title,
+                    year       = excluded.year,
+                    sourcePath = excluded.sourcePath,
+                    instance_id = excluded.instance_id,
+                    remote_item_id = excluded.remote_item_id,
+                    quality_label = excluded.quality_label,
+                    tmdb_id = excluded.tmdb_id,
+                    imdb_id = excluded.imdb_id,
+                    synced_at  = COALESCE(movies.synced_at, excluded.synced_at)
+                """,
+                ("@id", id), ("@f", m.Folder), ("@src", m.Source), ("@ref", m.SourceRef),
+                ("@t", m.Title), ("@y", (object?)m.Year ?? DBNull.Value), ("@sp", m.SourcePath),
+                ("@status", oldStatus), ("@ignored", oldIgnored),
+                ("@synced", (object?)oldSyncedAt ?? DBNull.Value),
+                ("@instance", (object?)m.InstanceId ?? DBNull.Value),
+                ("@remote", (object?)m.RemoteItemId ?? DBNull.Value),
+                ("@quality", (object?)m.QualityLabel ?? DBNull.Value),
+                ("@tmdb", (object?)m.TmdbId ?? DBNull.Value),
+                ("@imdb", (object?)m.ImdbId ?? DBNull.Value));
+            if (oldId is not null && oldId != id)
+                conn.Execute("""
+                    UPDATE movies
+                    SET ignored = CASE WHEN ignored = 1 OR @oldIgnored = 1 THEN 1 ELSE 0 END,
+                        status = CASE WHEN status = 'downloaded' OR @oldStatus = 'downloaded'
+                                      THEN 'downloaded' ELSE status END
+                    WHERE id = @id
+                    """, ("@oldIgnored", oldIgnored), ("@oldStatus", oldStatus), ("@id", id));
+        }
+        tx.Commit();
+        return relocated;
+    }
+
+    /// <summary>
+    /// Deletes movies whose folder was not in the most recent sync. Callers MUST only
+    /// invoke this after a sync that both succeeded and returned results — pruning on a
+    /// failed or empty sync would empty the library. Rows with <c>ignored = 1</c> are
+    /// never deleted, even when absent from the kept set: an ignored movie reflects an
+    /// explicit user decision, and silently reversing that (only for the movie to
+    /// re-sync as pending and get auto-downloaded into a folder the user opted out of)
+    /// is worse than leaving a harmless phantom row behind. Returns the number removed.
+    /// </summary>
+    public int PruneMoviesExcept(IEnumerable<string> keptFolders, string? source = null, string? instanceId = null)
+    {
+        // Build the kept set using derived IDs, not raw folder strings. folderName is stored
+        // verbatim (with or without trailing separators), but identity is MediaFolderId.For(folder)
+        // which normalizes those separators away. Comparing raw strings would incorrectly
+        // delete a kept folder if the caller passes it with a different trailing-separator state.
+        var keep = keptFolders
+            .Where(f => !string.IsNullOrEmpty(f))
+            .Select(f => MediaFolderId.For(f))
+            .ToHashSet(StringComparer.Ordinal);
+        if (keep.Count == 0) return 0;
+
+        using var conn = Open();
+        var doomed = new List<string>();
+        conn.Query("SELECT id, ignored, source, instance_id FROM movies", r =>
+        {
+            while (r.Read())
+                if (!keep.Contains(r.GetString(0)) && r.GetInt64(1) == 0
+                    && (source is null || string.Equals(r.GetString(2), source, StringComparison.Ordinal))
+                    && (instanceId is null || (!r.IsDBNull(3) && string.Equals(r.GetString(3), instanceId, StringComparison.Ordinal))))
+                    doomed.Add(r.GetString(0));
+        });
+
+        using var tx = conn.BeginTransaction();
+        foreach (var id in doomed)
+            conn.Execute("DELETE FROM movies WHERE id = @id", ("@id", id));
+        tx.Commit();
+        return doomed.Count;
+    }
+
+    public List<Dictionary<string, object?>> GetAllMovies()
+    {
+        using var conn = Open();
+        var result = new List<Dictionary<string, object?>>();
+        conn.Query("SELECT id, folderName, source, source_ref, title, year, sourcePath, status, ignored, instance_id, remote_item_id, quality_label, tmdb_id, imdb_id FROM movies ORDER BY status, title", r =>
+        {
+            while (r.Read())
+            {
+                var row = ReadMediaRow(r);
+                if (row != null) result.Add(row);
+            }
+        });
+        return result;
+    }
+
+    public Dictionary<string, object?>? GetMovie(string id)
+    {
+        using var conn = Open();
+        Dictionary<string, object?>? result = null;
+        conn.Query(
+            "SELECT id, folderName, source, source_ref, title, year, sourcePath, status, ignored, instance_id, remote_item_id, quality_label, tmdb_id, imdb_id FROM movies WHERE id = @id",
+            r => { if (r.Read()) result = ReadMediaRow(r); }, ("@id", id));
+        return result;
+    }
+
+    public List<Dictionary<string, object?>> GetStoredMovies() => GetStoredMedia(includePlexTheme: false);
+    public Dictionary<string, object?>? GetStoredMovie(string id) =>
+        GetStoredMovies().FirstOrDefault(row => row["id"]?.ToString() == id);
+
+    public void RemoveMovie(string id)
+    {
+        using var conn = Open();
+        conn.Execute("DELETE FROM movies WHERE id = @id", ("@id", id));
+    }
+
+    /// <summary>
+    /// Movies whose STORED status is 'pending' (never successfully downloaded), excluding
+    /// ignored ones. Unlike <see cref="GetAllMovies"/> this does NOT stat the filesystem:
+    /// it is the cheap pre-filter the auto-download worker runs every tick, so an idle,
+    /// fully-downloaded library costs one indexed query instead of a per-movie disk scan.
+    /// A caller that needs disk-verified state must still check each returned folder — a
+    /// row here may already have a theme added out-of-band (worker reconciles that).
+    /// </summary>
+    public List<Dictionary<string, object?>> GetPendingMovies()
+    {
+        using var conn = Open();
+        var result = new List<Dictionary<string, object?>>();
+        conn.Query(
+            "SELECT id, folderName, source, source_ref, title, year, sourcePath FROM movies WHERE status = 'pending' AND ignored = 0 ORDER BY title",
+            r =>
+            {
+                while (r.Read())
+                    result.Add(new Dictionary<string, object?>
+                    {
+                        ["id"] = r.GetString(0),
+                        ["folderName"] = r.IsDBNull(1) ? "" : r.GetString(1),
+                        ["source"] = r.GetString(2),
+                        ["sourceRef"] = r.IsDBNull(3) ? null : r.GetString(3),
+                        ["title"] = r.GetString(4),
+                        ["year"] = r.IsDBNull(5) ? null : r.GetInt32(5),
+                        ["sourcePath"] = r.IsDBNull(6) ? null : r.GetString(6),
+                    });
+            });
+        return result;
+    }
+
+    public void SetMovieStatus(string id, string status)
+    {
+        using var conn = Open();
+        conn.Execute("UPDATE movies SET status = @s WHERE id = @id", ("@s", status), ("@id", id));
+    }
+
+    public void SetMovieIgnored(string id, bool ignored)
+    {
+        using var conn = Open();
+        conn.Execute("UPDATE movies SET ignored = @v WHERE id = @id", ("@v", ignored ? 1 : 0), ("@id", id));
+    }
+
+    // ── Shows ───────────────────────────────────────────────────────────────────
+
+    public int UpsertShows(IEnumerable<ShowRecord> shows)
+    {
+        var relocated = 0;
+        using var conn = Open();
+        using var tx = conn.BeginTransaction();
+        foreach (var s in shows)
+        {
+            if (string.IsNullOrEmpty(s.Folder)) continue;
+            var id = MediaFolderId.For(s.Folder);
+
+            string? oldId = null;
+            long oldIgnored = 0;
+            string oldStatus = "pending";
+            string? oldSyncedAt = null;
+            if (!string.IsNullOrEmpty(s.SourceRef))
+                conn.Query("SELECT id, ignored, status, synced_at FROM shows WHERE source = @src AND source_ref = @ref LIMIT 1", r =>
+                {
+                    if (!r.Read()) return;
+                    oldId = r.GetString(0);
+                    oldIgnored = r.GetInt64(1);
+                    oldStatus = r.GetString(2);
+                    oldSyncedAt = r.IsDBNull(3) ? null : r.GetString(3);
+                }, ("@src", s.Source), ("@ref", s.SourceRef));
+
+            if (oldId is not null && oldId != id)
+            {
+                conn.Execute("DELETE FROM shows WHERE id = @id", ("@id", oldId));
+                conn.Execute("UPDATE theme_history SET movie_id = @new WHERE movie_id = @old AND media_type = 'show'",
+                    ("@new", id), ("@old", oldId));
+                relocated++;
+            }
+            conn.Execute("""
+                INSERT INTO shows (id, folderName, source, source_ref, title, year, sourcePath, status, ignored, synced_at, plex_has_theme, has_poster,
+                                   instance_id, remote_item_id, quality_label, tmdb_id, tvdb_id, imdb_id)
+                VALUES (@id, @f, @src, @ref, @t, @y, @sp, @status, @ignored,
+                        COALESCE(@synced, (SELECT synced_at FROM shows WHERE id = @id), strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+                        @pht, @poster, @instance, @remote, @quality, @tmdb, @tvdb, @imdb)
+                ON CONFLICT(id) DO UPDATE SET
+                    folderName     = excluded.folderName,
+                    source         = excluded.source,
+                    source_ref     = excluded.source_ref,
+                    title          = excluded.title,
+                    year           = excluded.year,
+                    sourcePath     = excluded.sourcePath,
+                    plex_has_theme = excluded.plex_has_theme,
+                    has_poster     = excluded.has_poster,
+                    instance_id    = excluded.instance_id,
+                    remote_item_id = excluded.remote_item_id,
+                    quality_label  = excluded.quality_label,
+                    tmdb_id        = excluded.tmdb_id,
+                    tvdb_id        = excluded.tvdb_id,
+                    imdb_id        = excluded.imdb_id,
+                    synced_at      = COALESCE(shows.synced_at, excluded.synced_at)
+                """,
+                ("@id", id), ("@f", s.Folder), ("@src", s.Source), ("@ref", s.SourceRef),
+                ("@t", s.Title), ("@y", (object?)s.Year ?? DBNull.Value), ("@sp", s.SourcePath),
+                ("@status", oldStatus), ("@ignored", oldIgnored),
+                ("@synced", (object?)oldSyncedAt ?? DBNull.Value), ("@pht", s.HasPlexTheme ? 1 : 0),
+                ("@poster", s.HasPoster ? 1 : 0),
+                ("@instance", (object?)s.InstanceId ?? DBNull.Value),
+                ("@remote", (object?)s.RemoteItemId ?? DBNull.Value),
+                ("@quality", (object?)s.QualityLabel ?? DBNull.Value),
+                ("@tmdb", (object?)s.TmdbId ?? DBNull.Value),
+                ("@tvdb", (object?)s.TvdbId ?? DBNull.Value),
+                ("@imdb", (object?)s.ImdbId ?? DBNull.Value));
+            if (oldId is not null && oldId != id)
+                conn.Execute("""
+                    UPDATE shows
+                    SET ignored = CASE WHEN ignored = 1 OR @oldIgnored = 1 THEN 1 ELSE 0 END,
+                        status = CASE WHEN status = 'downloaded' OR @oldStatus = 'downloaded'
+                                      THEN 'downloaded' ELSE status END
+                    WHERE id = @id
+                    """, ("@oldIgnored", oldIgnored), ("@oldStatus", oldStatus), ("@id", id));
+        }
+        tx.Commit();
+        return relocated;
+    }
+
+    /// <summary>Deletes shows whose folder was not in the most recent sync; never deletes
+    /// ignored ones. Same contract as <see cref="PruneMoviesExcept"/>. Returns the count removed.</summary>
+    public int PruneShowsExcept(IEnumerable<string> keptFolders, string? source = null, string? instanceId = null)
+    {
+        var keep = keptFolders.Where(f => !string.IsNullOrEmpty(f)).Select(MediaFolderId.For)
+                              .ToHashSet(StringComparer.Ordinal);
+        if (keep.Count == 0) return 0;
+
+        using var conn = Open();
+        var doomed = new List<string>();
+        conn.Query("SELECT id, ignored, source, instance_id FROM shows", r =>
+        {
+            while (r.Read())
+                if (!keep.Contains(r.GetString(0)) && r.GetInt64(1) == 0 &&
+                    (source is null || string.Equals(r.GetString(2), source, StringComparison.Ordinal)) &&
+                    (instanceId is null || (!r.IsDBNull(3) && string.Equals(r.GetString(3), instanceId, StringComparison.Ordinal))))
+                    doomed.Add(r.GetString(0));
+        });
+        using var tx = conn.BeginTransaction();
+        foreach (var id in doomed) conn.Execute("DELETE FROM shows WHERE id = @id", ("@id", id));
+        tx.Commit();
+        return doomed.Count;
+    }
+
+    public List<Dictionary<string, object?>> GetAllShows()
+    {
+        using var conn = Open();
+        var result = new List<Dictionary<string, object?>>();
+        conn.Query("SELECT id, folderName, source, source_ref, title, year, sourcePath, status, ignored, plex_has_theme, has_poster, instance_id, remote_item_id, quality_label, tmdb_id, tvdb_id, imdb_id FROM shows ORDER BY status, title",
+            r => { while (r.Read()) { var row = ReadShowRow(r); if (row != null) result.Add(row); } });
+        return result;
+    }
+
+    public Dictionary<string, object?>? GetShow(string id)
+    {
+        using var conn = Open();
+        Dictionary<string, object?>? result = null;
+        conn.Query("SELECT id, folderName, source, source_ref, title, year, sourcePath, status, ignored, plex_has_theme, has_poster, instance_id, remote_item_id, quality_label, tmdb_id, tvdb_id, imdb_id FROM shows WHERE id = @id",
+            r => { if (r.Read()) result = ReadShowRow(r); }, ("@id", id));
+        return result;
+    }
+
+    public List<Dictionary<string, object?>> GetStoredShows() => GetStoredMedia(includePlexTheme: true);
+    public Dictionary<string, object?>? GetStoredShow(string id) =>
+        GetStoredShows().FirstOrDefault(row => row["id"]?.ToString() == id);
+
+    public void RemoveShow(string id)
+    {
+        using var conn = Open();
+        conn.Execute("DELETE FROM shows WHERE id = @id", ("@id", id));
+    }
+
+    /// <summary>Shows whose stored status is 'pending', not ignored, and that Plex does not
+    /// already theme. Cheap pre-filter for the show auto-download worker (no filesystem stat).</summary>
+    public List<Dictionary<string, object?>> GetPendingShows()
+    {
+        using var conn = Open();
+        var result = new List<Dictionary<string, object?>>();
+        conn.Query(
+            "SELECT id, folderName, source, source_ref, title, year, sourcePath FROM shows WHERE status = 'pending' AND ignored = 0 AND plex_has_theme = 0 ORDER BY title",
+            r =>
+            {
+                while (r.Read())
+                    result.Add(new Dictionary<string, object?>
+                    {
+                        ["id"] = r.GetString(0),
+                        ["folderName"] = r.IsDBNull(1) ? "" : r.GetString(1),
+                        ["source"] = r.GetString(2),
+                        ["sourceRef"] = r.IsDBNull(3) ? null : r.GetString(3),
+                        ["title"] = r.GetString(4),
+                        ["year"] = r.IsDBNull(5) ? null : r.GetInt32(5),
+                        ["sourcePath"] = r.IsDBNull(6) ? null : r.GetString(6),
+                    });
+            });
+        return result;
+    }
+
+    public void SetShowStatus(string id, string status)
+    {
+        using var conn = Open();
+        conn.Execute("UPDATE shows SET status = @s WHERE id = @id", ("@s", status), ("@id", id));
+    }
+
+    public void SetShowIgnored(string id, bool ignored)
+    {
+        using var conn = Open();
+        conn.Execute("UPDATE shows SET ignored = @v WHERE id = @id", ("@v", ignored ? 1 : 0), ("@id", id));
+    }
+
+    // ── Stats ─────────────────────────────────────────────────────────────────
+
+    public StatsResult GetStats()
+    {
+        using var conn = Open();
+
+        // Movie counts: use filesystem-verified status (same logic as the movies page)
+        // so that the dashboard numbers always match what's shown there.
+        var allMovies = GetAllMovies();
+        int downloaded = allMovies.Count(m => m["status"]?.ToString() == "downloaded");
+        int pending = allMovies.Count(m => m["status"]?.ToString() == "pending");
+        int ignored = allMovies.Count(m => m["status"]?.ToString() == "ignored");
+
+        // Total = entire Plex library (all rows, including ignored and movies whose
+        // folders aren't yet mapped), so coverage reflects the full library, not just
+        // the subset the app has processed.
+        var total = 0;
+        conn.Query("SELECT COUNT(*) FROM movies",
+            r => { if (r.Read()) total = (int)r.GetInt64(0); });
+
+        var coverage = total > 0 ? Math.Round(downloaded * 100.0 / total, 1) : 0.0;
+
+        // Themes added in the last 7 days. Scoped to movies: every other number on this
+        // dashboard (total, coverage, pending) comes from the movies table alone, so
+        // counting show themes here would inflate the week against a movies-only
+        // denominator. Shows get their own stats with the shows UI.
+        int addedThisWeek = 0;
+        var weekAgo = DateTime.UtcNow.AddDays(-7).ToString("o");
+        conn.Query("SELECT COUNT(*) FROM theme_history WHERE downloaded_at >= @w AND media_type = 'movie'",
+            r => { if (r.Read()) addedThisWeek = (int)r.GetInt64(0); }, ("@w", weekAgo));
+
+        // Last 5 downloaded movie themes (see above — this list feeds the movies dashboard).
+        var recentActivity = new List<Dictionary<string, object?>>();
+        conn.Query(
+            "SELECT id, movie_id, movie_title, movie_year, theme_title, source_url, downloaded_at FROM theme_history WHERE media_type = 'movie' ORDER BY id DESC LIMIT 5",
+            r =>
+            {
+                while (r.Read())
+                    recentActivity.Add(new Dictionary<string, object?>
+                    {
+                        ["id"] = r.GetInt64(0),
+                        ["movieId"] = r.GetString(1),
+                        ["movieTitle"] = r.GetString(2),
+                        ["movieYear"] = r.IsDBNull(3) ? null : r.GetInt32(3),
+                        ["themeTitle"] = r.IsDBNull(4) ? null : r.GetString(4),
+                        ["sourceUrl"] = r.IsDBNull(5) ? null : r.GetString(5),
+                        ["downloadedAt"] = r.GetString(6),
+                    });
+            });
+
+        // Last 5 recently-synced movies that are still pending (filesystem-verified).
+        // Pull extra candidates from DB ordered by syncedAt, then cross-reference with
+        // allMovies so only movies whose folders+files confirm 'pending' status are shown.
+        var pendingIds = allMovies
+            .Where(m => m["status"]?.ToString() == "pending")
+            .Select(m => m["id"]?.ToString())
+            .ToHashSet();
+
+        var recentlyAdded = new List<Dictionary<string, object?>>();
+        conn.Query("""
+            SELECT id, source, source_ref, title, year, synced_at
+            FROM movies
+            WHERE ignored = 0 AND status = 'pending' AND synced_at IS NOT NULL
+            ORDER BY synced_at DESC LIMIT 20
+            """, r =>
+        {
+            while (r.Read() && recentlyAdded.Count < 5)
+            {
+                var id = r.GetString(0);
+                if (!pendingIds.Contains(id)) continue;
+                recentlyAdded.Add(new Dictionary<string, object?>
+                {
+                    ["id"] = id,
+                    ["source"] = r.GetString(1),
+                    ["sourceRef"] = r.IsDBNull(2) ? null : r.GetString(2),
+                    ["title"] = r.GetString(3),
+                    ["year"] = r.IsDBNull(4) ? null : r.GetInt32(4),
+                    ["syncedAt"] = r.IsDBNull(5) ? null : r.GetString(5),
+                });
+            }
+        });
+
+        return new StatsResult(total, downloaded, pending, ignored, coverage, addedThisWeek, recentActivity, recentlyAdded);
+    }
+
+    /// <summary>
+    /// Aggregate show counts for the shows dashboard. Coverage counts a Plex-themed show
+    /// as covered — it has a theme, just not one ThemeForge wrote — so the number matches
+    /// what the user actually hears. The per-state counts are returned alongside it so
+    /// that number stays explainable rather than a black box.
+    /// </summary>
+    public ShowStatsResult GetShowStats()
+    {
+        var all = GetAllShows();
+        var downloaded = all.Count(s => s["status"]?.ToString() == "downloaded");
+        var plexTheme = all.Count(s => s["status"]?.ToString() == "plexTheme");
+        var pending = all.Count(s => s["status"]?.ToString() == "pending");
+        var ignored = all.Count(s => s["status"]?.ToString() == "ignored");
+
+        var total = all.Count;
+        var coverage = total > 0 ? Math.Round((downloaded + plexTheme) * 100.0 / total, 1) : 0.0;
+
+        return new ShowStatsResult(total, downloaded, plexTheme, pending, ignored, coverage);
+    }
+
+    // ── History ───────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Records a downloaded theme. The <c>movie_*</c> column names are historical — the
+    /// table now carries shows too, discriminated by <paramref name="mediaType"/>
+    /// ("movie" | "show"), which defaults to "movie" so every existing caller is unchanged.
+    /// </summary>
+    public void AddThemeHistory(string movieId, string movieTitle, int? movieYear,
+        string? themeTitle, string? sourceUrl, string mediaType = "movie", object? installationResults = null)
+    {
+        using var conn = Open();
+        conn.Execute(
+            "INSERT INTO theme_history (movie_id, movie_title, movie_year, theme_title, source_url, downloaded_at, media_type, installation_results_json) VALUES (@mid, @t, @y, @tt, @url, @dt, @mt, @results)",
+            ("@mid", movieId), ("@t", movieTitle),
+            ("@y", (object?)movieYear ?? DBNull.Value),
+            ("@tt", (object?)themeTitle ?? DBNull.Value),
+            ("@url", (object?)sourceUrl ?? DBNull.Value),
+            ("@dt", DateTime.UtcNow.ToString("o")),
+            ("@mt", mediaType),
+            ("@results", installationResults is null ? DBNull.Value : JsonSerializer.Serialize(installationResults)));
+    }
+
+    public List<Dictionary<string, object?>> GetThemeHistory(int limit = 200)
+    {
+        using var conn = Open();
+        var result = new List<Dictionary<string, object?>>();
+        conn.Query(
+            // media_type is appended last so the existing ordinal reads stay put.
+            "SELECT id, movie_id, movie_title, movie_year, theme_title, source_url, downloaded_at, media_type, installation_results_json FROM theme_history ORDER BY id DESC LIMIT @lim",
+            r =>
+            {
+                while (r.Read())
+                    result.Add(new Dictionary<string, object?>
+                    {
+                        ["id"] = r.GetInt64(0),
+                        ["movieId"] = r.GetString(1),
+                        ["movieTitle"] = r.GetString(2),
+                        ["movieYear"] = r.IsDBNull(3) ? null : r.GetInt32(3),
+                        ["themeTitle"] = r.IsDBNull(4) ? null : r.GetString(4),
+                        ["sourceUrl"] = r.IsDBNull(5) ? null : r.GetString(5),
+                        ["downloadedAt"] = r.GetString(6),
+                        ["mediaType"] = r.GetString(7),
+                        ["installationResults"] = r.IsDBNull(8) ? null
+                            : JsonSerializer.Deserialize<object>(r.GetString(8)),
+                    });
+            }, ("@lim", limit));
+        return result;
+    }
+
+    /// <summary>
+    /// Show rows carry a fourth status, 'plexTheme', for a show Plex already themes but
+    /// which has no local theme file. Deliberately separate from <see cref="ReadMediaRow"/>:
+    /// movies have no equivalent state, and widening the shared reader would change movie
+    /// behaviour. Expects the SELECT to end with <c>..., ignored, plex_has_theme</c>.
+    /// </summary>
+    private Dictionary<string, object?>? ReadShowRow(SqliteDataReader r)
+    {
+        var ignored = !r.IsDBNull(8) && r.GetInt32(8) == 1;
+        var plexHasTheme = !r.IsDBNull(9) && r.GetInt32(9) == 1;
+        var folder = r.IsDBNull(1) ? "" : r.GetString(1);
+        var authorizationRow = new Dictionary<string, object?>
+        {
+            ["folderName"] = folder,
+            ["source"] = r.GetString(2),
+            ["sourcePath"] = r.IsDBNull(6) ? null : r.GetString(6),
+        };
+
+        // Preserve the legacy read-only view before roots have been configured. Once a
+        // root exists, never inspect theme files in a folder that current source
+        // resolution and local-root authorization reject; expose it as unresolved so
+        // the UI can explain/repair it while all file operations remain blocked.
+        if (!ignored && (string.IsNullOrEmpty(folder) || !Directory.Exists(folder)))
+            return null;
+        var rootsConfigured = GetTrustedLibraryRoots().Count > 0;
+        var authorized = !rootsConfigured || ignored || new LocalFolderResolver(this)
+            .IsStoredFolderAuthorized(authorizationRow, isShow: true, out _);
+
+        // Order matters. A local file is a fact on disk and always beats Plex having its
+        // own theme, so downloading one for a plexTheme show visibly moves it to
+        // 'downloaded' instead of appearing to do nothing.
+        string status;
+        if (ignored) status = "ignored";
+        else if (!authorized) status = "unresolved";
+        else if (ThemeFiles.HasUsableThemeInExistingFolder(folder)) status = "downloaded";
+        else if (plexHasTheme) status = "plexTheme";
+        else status = "pending";
+
+        return new Dictionary<string, object?>
+        {
+            ["id"] = r.GetString(0),
+            ["folderName"] = folder,
+            ["source"] = r.GetString(2),
+            ["sourceRef"] = r.IsDBNull(3) ? null : r.GetString(3),
+            ["title"] = r.GetString(4),
+            ["year"] = r.IsDBNull(5) ? null : r.GetInt32(5),
+            ["sourcePath"] = r.IsDBNull(6) ? null : r.GetString(6),
+            ["status"] = status,
+            ["ignored"] = ignored,
+            ["plexHasTheme"] = plexHasTheme,
+            ["hasPoster"] = r.FieldCount > 10 && !r.IsDBNull(10) && r.GetInt32(10) == 1,
+            ["instanceId"] = r.FieldCount > 11 && !r.IsDBNull(11) ? r.GetString(11) : null,
+            ["remoteItemId"] = r.FieldCount > 12 && !r.IsDBNull(12) ? r.GetString(12) : null,
+            ["qualityLabel"] = r.FieldCount > 13 && !r.IsDBNull(13) ? r.GetString(13) : null,
+            ["tmdbId"] = r.FieldCount > 14 && !r.IsDBNull(14) ? r.GetString(14) : null,
+            ["tvdbId"] = r.FieldCount > 15 && !r.IsDBNull(15) ? r.GetString(15) : null,
+            ["imdbId"] = r.FieldCount > 16 && !r.IsDBNull(16) ? r.GetString(16) : null,
+        };
+    }
+
+    private Dictionary<string, object?>? ReadMediaRow(SqliteDataReader r)
+    {
+        var ignored = !r.IsDBNull(8) && r.GetInt32(8) == 1;
+        var folder = r.IsDBNull(1) ? "" : r.GetString(1);
+        var authorizationRow = new Dictionary<string, object?>
+        {
+            ["folderName"] = folder,
+            ["source"] = r.GetString(2),
+            ["sourcePath"] = r.IsDBNull(6) ? null : r.GetString(6),
+        };
+
+        // Always return ignored rows so they can be unignored. Keep the legacy
+        // read-only view before roots are configured; after that, expose rejected rows
+        // as unresolved without touching theme files beneath their stored folder.
+        if (!ignored && (string.IsNullOrEmpty(folder) || !Directory.Exists(folder)))
+            return null;
+        var rootsConfigured = GetTrustedLibraryRoots().Count > 0;
+        var authorized = !rootsConfigured || ignored || new LocalFolderResolver(this)
+            .IsStoredFolderAuthorized(authorizationRow, isShow: false, out _);
+
+        string status;
+        if (ignored)
+            status = "ignored";
+        else if (!authorized)
+            status = "unresolved";
+        else
+        {
+            // A zero-byte/truncated theme.* is treated as not-downloaded so it gets
+            // retried rather than being marked done forever (see ThemeFiles). Folder
+            // existence was just confirmed above, so skip the redundant re-stat.
+            status = ThemeFiles.HasUsableThemeInExistingFolder(folder) ? "downloaded" : "pending";
+        }
+
+        return new Dictionary<string, object?>
+        {
+            ["id"] = r.GetString(0),
+            ["folderName"] = folder,
+            ["source"] = r.GetString(2),
+            ["sourceRef"] = r.IsDBNull(3) ? null : r.GetString(3),
+            ["title"] = r.GetString(4),
+            ["year"] = r.IsDBNull(5) ? null : r.GetInt32(5),
+            ["sourcePath"] = r.IsDBNull(6) ? null : r.GetString(6),
+            ["status"] = status,
+            ["ignored"] = ignored,
+            ["instanceId"] = r.FieldCount > 9 && !r.IsDBNull(9) ? r.GetString(9) : null,
+            ["remoteItemId"] = r.FieldCount > 10 && !r.IsDBNull(10) ? r.GetString(10) : null,
+            ["qualityLabel"] = r.FieldCount > 11 && !r.IsDBNull(11) ? r.GetString(11) : null,
+            ["tmdbId"] = r.FieldCount > 12 && !r.IsDBNull(12) ? r.GetString(12) : null,
+            ["imdbId"] = r.FieldCount > 13 && !r.IsDBNull(13) ? r.GetString(13) : null,
+        };
+    }
+
+    private List<Dictionary<string, object?>> GetStoredMedia(bool includePlexTheme)
+    {
+        using var conn = Open();
+        var result = new List<Dictionary<string, object?>>();
+        var sql = includePlexTheme
+            ? "SELECT id, folderName, source, source_ref, title, year, sourcePath, status, ignored, plex_has_theme, instance_id, remote_item_id, quality_label, tmdb_id, tvdb_id, imdb_id FROM shows"
+            : "SELECT id, folderName, source, source_ref, title, year, sourcePath, status, ignored, 0, instance_id, remote_item_id, quality_label, tmdb_id, NULL, imdb_id FROM movies";
+        conn.Query(sql, r =>
+        {
+            while (r.Read())
+                result.Add(new Dictionary<string, object?>
+                {
+                    ["id"] = r.GetString(0),
+                    ["folderName"] = r.IsDBNull(1) ? "" : r.GetString(1),
+                    ["source"] = r.GetString(2),
+                    ["sourceRef"] = r.IsDBNull(3) ? null : r.GetString(3),
+                    ["title"] = r.GetString(4),
+                    ["year"] = r.IsDBNull(5) ? null : r.GetInt32(5),
+                    ["sourcePath"] = r.IsDBNull(6) ? null : r.GetString(6),
+                    ["status"] = r.GetString(7),
+                    ["ignored"] = r.GetInt64(8) != 0,
+                    ["plexHasTheme"] = r.GetInt64(9) != 0,
+                    ["instanceId"] = r.IsDBNull(10) ? null : r.GetString(10),
+                    ["remoteItemId"] = r.IsDBNull(11) ? null : r.GetString(11),
+                    ["qualityLabel"] = r.IsDBNull(12) ? null : r.GetString(12),
+                    ["tmdbId"] = r.IsDBNull(13) ? null : r.GetString(13),
+                    ["tvdbId"] = r.IsDBNull(14) ? null : r.GetString(14),
+                    ["imdbId"] = r.IsDBNull(15) ? null : r.GetString(15),
+                });
+        });
+        return result;
+    }
+}
+
+// ── Extension helpers ─────────────────────────────────────────────────────────
+
+file static class SqliteExtensions
+{
+    public static void Execute(this SqliteConnection conn, string sql, params (string name, object? value)[] parameters)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql; // nosemgrep: csharp-sqli — literal SQL only; all values bound via SqliteParameter
+        foreach (var (name, value) in parameters)
+            cmd.Parameters.AddWithValue(name, value ?? DBNull.Value);
+        cmd.ExecuteNonQuery();
+    }
+
+    // Callback form: the command and reader are disposed here, so no SqliteCommand
+    // is leaked to the caller (the reader can't outlive its command anyway).
+    public static void Query(
+        this SqliteConnection conn, string sql, Action<SqliteDataReader> read,
+        params (string name, object? value)[] parameters)
+    {
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = sql; // nosemgrep: csharp-sqli — literal SQL only; all values bound via SqliteParameter
+        foreach (var (name, value) in parameters)
+            cmd.Parameters.AddWithValue(name, value ?? DBNull.Value);
+        using var r = cmd.ExecuteReader();
+        read(r);
+    }
+}
+
+// ── DTOs ──────────────────────────────────────────────────────────────────────
+
+/// <summary>Show equivalent of <see cref="StatsResult"/>. Separate because shows carry a
+/// state movies do not (plexTheme) and have no "recently added" poster feed of their own.</summary>
+public record ShowStatsResult(
+    int Total, int Downloaded, int PlexTheme, int Pending, int Ignored, double Coverage);
+
+public record StatsResult(
+    int Total,
+    int Downloaded,
+    int Pending,
+    int Ignored,
+    double Coverage,
+    int AddedThisWeek,
+    List<Dictionary<string, object?>> RecentActivity,
+    List<Dictionary<string, object?>> RecentlyAdded);
+
+/// <summary>Internal Arr configuration. Controllers must project this record to a
+/// redacted response and must never serialize <see cref="ApiKey"/>.</summary>
+public sealed record ArrInstance(
+    string Id,
+    string ServiceType,
+    string Name,
+    string Url,
+    string ApiKey,
+    bool Enabled,
+    string? QualityLabel,
+    int Priority,
+    IReadOnlyList<string> Tags,
+    string CreatedAt,
+    string UpdatedAt,
+    string? LastSuccessfulSyncAt,
+    string Health,
+    string? HealthDetail,
+    int UnresolvedPathCount,
+    string? UnresolvedPathSample);
+
+/// <summary>
+/// A movie as reported by a library source. There is no id: identity is the resolved
+/// local folder, and the stored id is derived from it via <see cref="MediaFolderId"/>.
+/// </summary>
+public record MovieRecord(
+    string Folder,
+    string Source,
+    string SourceRef,
+    string Title,
+    int? Year,
+    string SourcePath,
+    string? InstanceId = null,
+    string? RemoteItemId = null,
+    string? QualityLabel = null,
+    string? TmdbId = null,
+    string? ImdbId = null);
+
+/// <summary>
+/// A TV show as reported by a library source. Identity is the resolved local (show
+/// root) folder; the stored id is derived from it via <see cref="Themearr.API.Services.MediaFolderId"/>.
+/// <paramref name="HasPlexTheme"/> is true when Plex already provides a theme for the
+/// show (its `theme` attribute is present) — such shows are not download candidates.
+/// </summary>
+public record ShowRecord(
+    string Folder, string Source, string SourceRef, string Title, int? Year, string SourcePath,
+    bool HasPlexTheme, bool HasPoster = true,
+    string? InstanceId = null, string? RemoteItemId = null, string? QualityLabel = null,
+    string? TmdbId = null, string? TvdbId = null, string? ImdbId = null);

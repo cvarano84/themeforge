@@ -1,0 +1,118 @@
+using System.Security.Cryptography;
+using System.Text;
+
+namespace Themearr.API.Services;
+
+public class ApiAuthMiddleware(
+    RequestDelegate next, IConfiguration config, ILogger<ApiAuthMiddleware> log, IApiKeyStore keys)
+{
+    // Marks which credential authenticated a request, so downstream code can tell the
+    // master bearer token apart from the (regeneratable, externally-held) API key —
+    // e.g. to refuse letting the API key manage itself. Deliberately just this one bit,
+    // not a general scope/permission system.
+    public const string AuthSchemeItemKey = "auth.scheme";
+    public const string BearerScheme = "bearer";
+    public const string ApiKeyScheme = "apikey";
+
+    private readonly byte[] _expected = LoadToken(config, log);
+
+    /// <summary>
+    /// Which paths this middleware guards: everything under <c>/api</c> except the two
+    /// public prefixes. <c>/api/auth</c> is public because you have no credential yet;
+    /// <c>/api/poster</c> is public because an <c>&lt;img&gt;</c> tag cannot send an
+    /// Authorization header, so poster URLs self-authenticate via a signed, expiring query
+    /// string instead.
+    ///
+    /// Extracted from Program.cs so the boundary is testable — a widened prefix here would
+    /// silently expose an entire namespace, which no other test would catch.
+    /// <c>StartsWithSegments</c> matches on segment boundaries, so <c>/api/posterize</c> is
+    /// NOT covered by the <c>/api/poster</c> exemption, while <c>/api/poster/show</c> is.
+    /// </summary>
+    public static bool RequiresAuth(PathString path) =>
+        path.StartsWithSegments("/api")
+        && !path.StartsWithSegments("/api/auth")
+        && !path.StartsWithSegments("/api/poster");
+
+    public async Task Invoke(HttpContext ctx)
+    {
+        var header = ctx.Request.Headers.Authorization.ToString();
+        if (header.StartsWith("Bearer ", StringComparison.Ordinal))
+        {
+            var provided = Encoding.UTF8.GetBytes(header[7..].Trim());
+            if (provided.Length == _expected.Length &&
+                CryptographicOperations.FixedTimeEquals(provided, _expected))
+            {
+                ctx.Items[AuthSchemeItemKey] = BearerScheme;
+                await next(ctx);
+                return;
+            }
+        }
+
+        // Only touch the key store when the header is actually present. The browser
+        // sends Bearer and never sets this, so its hot path — every page load, the
+        // health poll, the sync poll — never reads the database.
+        var apiKey = ctx.Request.Headers["X-Api-Key"].ToString().Trim();
+        if (!string.IsNullOrEmpty(apiKey))
+        {
+            var provided = Encoding.UTF8.GetBytes(apiKey);
+            var expected = Encoding.UTF8.GetBytes(keys.Current);
+            if (provided.Length == expected.Length &&
+                CryptographicOperations.FixedTimeEquals(provided, expected))
+            {
+                ctx.Items[AuthSchemeItemKey] = ApiKeyScheme;
+                await next(ctx);
+                return;
+            }
+        }
+
+        ctx.Response.StatusCode = StatusCodes.Status401Unauthorized;
+        ctx.Response.Headers["WWW-Authenticate"] = $"Bearer realm=\"{ProductBrand.Name}\"";
+        await ctx.Response.WriteAsJsonAsync(new { detail = "Unauthorized" });
+    }
+
+    internal static byte[] LoadToken(IConfiguration config, ILogger log)
+    {
+        var token = CompatibilityConfiguration.EnvironmentValue(
+                        "THEMEFORGE_AUTH_TOKEN", "THEMEARR_AUTH_TOKEN",
+                        message => log.LogWarning("{CompatibilityWarning}", message))?.Trim()
+                    ?? CompatibilityConfiguration.Setting(config, "AuthToken")?.Trim()
+                    ?? "";
+        if (string.IsNullOrEmpty(token))
+        {
+            log.LogCritical("THEMEFORGE_AUTH_TOKEN is not set — refusing to start with an unauthenticated API.");
+            throw new InvalidOperationException("THEMEFORGE_AUTH_TOKEN must be set.");
+        }
+        if (token.Length < 16)
+        {
+            log.LogCritical("THEMEFORGE_AUTH_TOKEN must be at least 16 characters.");
+            throw new InvalidOperationException("THEMEFORGE_AUTH_TOKEN too short.");
+        }
+        return Encoding.UTF8.GetBytes(token);
+    }
+
+    public static bool Matches(IConfiguration config, string candidate)
+    {
+        var token = CompatibilityConfiguration.EnvironmentValue(
+                        "THEMEFORGE_AUTH_TOKEN", "THEMEARR_AUTH_TOKEN")?.Trim()
+                    ?? CompatibilityConfiguration.Setting(config, "AuthToken")?.Trim()
+                    ?? "";
+        if (string.IsNullOrEmpty(token) || string.IsNullOrEmpty(candidate)) return false;
+        var a = Encoding.UTF8.GetBytes(candidate);
+        var b = Encoding.UTF8.GetBytes(token);
+        return a.Length == b.Length && CryptographicOperations.FixedTimeEquals(a, b);
+    }
+}
+
+public static class AuthSchemeExtensions
+{
+    /// <summary>
+    /// True when the request authenticated with the master bearer token rather than the
+    /// (regeneratable, externally-held) API key. Gate the most privileged operations —
+    /// reading/rotating the API key, triggering a root host update, wiping app state —
+    /// on this, so a leaked/compromised holder of the Radarr-side key can't reach them.
+    /// The marker is set by <see cref="ApiAuthMiddleware"/> on the authenticated request.
+    /// </summary>
+    public static bool AuthenticatedWithBearerToken(this HttpContext ctx) =>
+        ctx.Items.TryGetValue(ApiAuthMiddleware.AuthSchemeItemKey, out var scheme) &&
+        (scheme as string) == ApiAuthMiddleware.BearerScheme;
+}

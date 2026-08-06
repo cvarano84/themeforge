@@ -1,0 +1,71 @@
+services:
+  themearr:
+    # Compatibility note: ThemeForge remains published at the existing image path.
+    # Updates are still just `docker compose pull`.
+    image: ghcr.io/themearr/themearr:latest
+    # To build from source instead, comment out `image:` above and uncomment:
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    #   args:
+    #     APP_VERSION: dev
+    container_name: themearr
+    ports:
+      # Bound to loopback only — put a reverse proxy (caddy/nginx) in front for
+      # remote access. Change the left-hand "127.0.0.1" at your own risk.
+      - "127.0.0.1:8080:8080"
+    volumes:
+      # Persist database and config
+      - themearr-data:/opt/themearr/data
+      # Mount your movie library — REQUIRED: edit the host path before `docker compose up`.
+      # Must be writable (no `:ro`) — ThemeForge writes theme.mp3 into each movie folder.
+      - /path/to/your/movies:/movies
+      # Optional TV library. Also writable: show themes are written to each series root.
+      # The container path is only an example; choose any path and configure it in ThemeForge.
+      - /path/to/your/tv:/shows
+      # Example when Plex reports /mnt/plex/Movies:
+      # - /mnt/plex/Movies:/movies
+      # - /mnt/plex/TV:/shows
+      # Optional cookies mount (not needed for normal public videos):
+      # - ./youtube-cookies.txt:/opt/themearr/config/youtube-cookies.txt:ro
+    environment:
+      - DB_PATH=/opt/themearr/data/themearr.db
+      - ASPNETCORE_ENVIRONMENT=Production
+      - YTDLP_AUDIO_QUALITY=192K
+      - YTDLP_DOWNLOAD_TIMEOUT_SECONDS=300
+      - YTDLP_CONCURRENT_DOWNLOADS=1
+      - YTDLP_PO_TOKEN_MODE=auto
+      - YTDLP_PO_TOKEN_PROVIDER_URL=http://themearr-pot-provider:4416
+      # Optional restricted-video authentication. Mount the Netscape-format file
+      # read-only below and uncomment this variable.
+      # - YTDLP_COOKIES_FILE=/opt/themearr/config/youtube-cookies.txt
+      # REQUIRED: generate with `openssl rand -hex 32` and keep it secret.
+      # ThemeForge takes precedence; the legacy alias keeps old .env files working.
+      - THEMEFORGE_AUTH_TOKEN=${THEMEFORGE_AUTH_TOKEN:-}
+      - THEMEARR_AUTH_TOKEN=${THEMEARR_AUTH_TOKEN:-}
+    depends_on:
+      - themearr-pot-provider
+    read_only: true
+    tmpfs:
+      # The official standalone yt-dlp binary extracts executable components here.
+      - /tmp:rw,exec,nosuid,size=512m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    restart: unless-stopped
+
+  themearr-pot-provider:
+    # Pinned to the same version as the yt-dlp plugin bundled in ThemeForge.
+    # This service is internal-only: expose does not publish port 4416 on the host.
+    image: brainicism/bgutil-ytdlp-pot-provider:1.3.1
+    container_name: themearr-pot-provider
+    init: true
+    expose:
+      - "4416"
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+
+volumes:
+  themearr-data:

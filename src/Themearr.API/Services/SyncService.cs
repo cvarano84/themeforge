@@ -6,10 +6,15 @@ namespace Themearr.API.Services;
 
 public class SyncService(
     Database db, LibrarySourceResolver sources, ILogger<SyncService> log,
-    LibraryPathRepairService? pathRepair = null)
+    LibraryPathRepairService? pathRepair = null,
+    ThemeReconciliationService? themeReconciler = null,
+    RadarrWebhookReconciliationQueue? webhookReconciliationQueue = null)
 {
     private readonly LibraryPathRepairService _pathRepair = pathRepair
         ?? new LibraryPathRepairService(db, new LocalFolderResolver(db));
+    private readonly ThemeReconciliationService _themeReconciler = themeReconciler
+        ?? new ThemeReconciliationService(db,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<ThemeReconciliationService>.Instance);
     private readonly SemaphoreSlim _lock = new(1, 1);
     private readonly ConcurrentQueue<string> _logs = new();
     private volatile bool _inProgress;
@@ -106,6 +111,22 @@ public class SyncService(
             else if (movies.Count > 0)
             {
                 AddLog($"Skipped pruning: {unresolved} movie(s) could not be resolved this sync");
+            }
+
+            // Upsert intentionally preserves user state, including the last successful
+            // status. Revalidate Radarr locations against disk after pruning stale rows
+            // on every scheduled, manual, or webhook-triggered sync so a replacement
+            // cannot remain hidden behind a stale 'downloaded' value.
+            if (source is RadarrLibrarySource)
+            {
+                var requested = webhookReconciliationQueue?.Drain() ?? [];
+                var moviesToReconcile = requested.Count == 0
+                    ? movies
+                    : movies.Where(movie => requested.Any(identity => identity.Matches(movie))).ToList();
+                var reconciliation = await _themeReconciler.ReconcileMoviesAsync(
+                    moviesToReconcile, AddLog, CancellationToken.None);
+                AddLog($"Theme reconciliation: {reconciliation.Copied} copied, " +
+                    $"{reconciliation.Missing} still pending, {reconciliation.Failed} failed");
             }
 
             AddLog($"Sync complete. {movies.Count} movies available locally.");

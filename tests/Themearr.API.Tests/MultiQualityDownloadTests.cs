@@ -26,7 +26,7 @@ public sealed class MultiQualityDownloadTests
     { public HttpClient CreateClient(string name) => new(); }
 
     private static (DownloadService Service, Database Db, Provider Provider, string FirstId, string A, string B)
-        Build(TempDir dir, bool existingSecond = false, bool block = false)
+        Build(TempDir dir, bool existingSecond = false, bool block = false, bool failReconcileCopy = false)
     {
         var db = new Database(Path.Combine(dir.Path, "db", "test.db")); db.Init();
         var aFolder = Path.Combine(dir.Path, "movies", "Matrix"); Directory.CreateDirectory(aFolder);
@@ -43,8 +43,13 @@ public sealed class MultiQualityDownloadTests
         var provider = new Provider(block);
         var config = new ConfigurationBuilder().AddInMemoryCollection(
             new Dictionary<string, string?> { ["Themearr:DownloadTimeoutSeconds"] = "10" }).Build();
+        ThemeReconciliationService? reconciler = failReconcileCopy
+            ? new ThemeReconciliationService(db, NullLogger<ThemeReconciliationService>.Instance,
+                (_, _, _) => throw new IOException("simulated reconciliation copy failure"))
+            : null;
         return (new DownloadService(provider, db, new Factory(), config,
-            NullLogger<DownloadService>.Instance), db, provider, MediaFolderId.For(aFolder), aFolder, bFolder);
+            NullLogger<DownloadService>.Instance, themeReconciler: reconciler),
+            db, provider, MediaFolderId.For(aFolder), aFolder, bFolder);
     }
 
     private static async Task Wait(DownloadService service, string id)
@@ -87,6 +92,38 @@ public sealed class MultiQualityDownloadTests
         Assert.Equal(0, provider.Calls);
         Assert.Equal(await File.ReadAllBytesAsync(Path.Combine(b, "theme.mp3")),
             await File.ReadAllBytesAsync(Path.Combine(a, "theme.mp3")));
+    }
+
+    [Fact]
+    public async Task Stale_downloaded_state_with_no_source_acquires_once_and_repairs_all_locations()
+    {
+        using var dir = new TempDir();
+        var (service, db, provider, id, a, b) = Build(dir);
+        foreach (var movie in db.GetStoredMovies())
+            db.SetMovieStatus(movie["id"]!.ToString()!, "downloaded");
+
+        Assert.True(service.Start(id, "https://www.youtube.com/watch?v=abc12345678"));
+        await Wait(service, id);
+
+        Assert.Equal(1, provider.Calls);
+        Assert.NotNull(ThemeFiles.FindUsableThemeMp3(a));
+        Assert.NotNull(ThemeFiles.FindUsableThemeMp3(b));
+        Assert.Empty(db.GetPendingMovies());
+    }
+
+    [Fact]
+    public async Task Reconciliation_copy_failure_falls_back_to_provider_acquisition()
+    {
+        using var dir = new TempDir();
+        var (service, _, provider, id, a, b) = Build(
+            dir, existingSecond: true, failReconcileCopy: true);
+
+        Assert.True(service.Start(id, "https://www.youtube.com/watch?v=abc12345678"));
+        await Wait(service, id);
+
+        Assert.Equal(1, provider.Calls);
+        Assert.NotNull(ThemeFiles.FindUsableThemeMp3(a));
+        Assert.NotNull(ThemeFiles.FindUsableThemeMp3(b));
     }
 
     [Fact]

@@ -38,6 +38,32 @@ public static class ThemeFiles
             .Any(f => !IsNonTheme(f) && new FileInfo(f).Length > 0);
 
     /// <summary>
+    /// Returns the exact completed <c>theme.mp3</c> when it is a readable, regular,
+    /// non-empty file within the configured theme size ceiling. Reconciliation uses
+    /// this stricter check because its contract is to restore theme.mp3 specifically,
+    /// not merely discover a playable alternate extension.
+    /// </summary>
+    public static string? FindUsableThemeMp3(string folder)
+    {
+        if (string.IsNullOrWhiteSpace(folder) || !Directory.Exists(folder)) return null;
+        var path = Path.Combine(folder, "theme.mp3");
+        try
+        {
+            if (!File.Exists(path)) return null;
+            var info = new FileInfo(path);
+            if ((info.Attributes & (FileAttributes.Directory | FileAttributes.ReparsePoint)) != 0
+                || info.Length <= 0 || info.Length > StreamLimits.MaxThemeBytes)
+                return null;
+            using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            return stream.CanRead ? path : null;
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
     /// True if the service user can actually create a file in <paramref name="folder"/>.
     /// Used to surface a clear error up front instead of failing every download
     /// silently — the typical Proxmox case where the <c>themearr</c> user lacks write

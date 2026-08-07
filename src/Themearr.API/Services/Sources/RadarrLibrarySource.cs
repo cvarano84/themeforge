@@ -10,7 +10,11 @@ namespace Themearr.API.Services.Sources;
 /// user needs no Plex at all. Because theme.mp3 is read by Jellyfin, Emby and Kodi
 /// too, this is what makes ThemeForge useful to them.
 /// </summary>
-public class RadarrLibrarySource(Database db, LocalFolderResolver folders, IHttpClientFactory factory)
+public class RadarrLibrarySource(
+    Database db,
+    LocalFolderResolver folders,
+    IHttpClientFactory factory,
+    ThemeReconciliationService? themeReconciler = null)
     : ILibrarySource
 {
     private readonly AsyncLocal<ArrInstance?> _activeInstance = new();
@@ -257,6 +261,8 @@ public class RadarrLibrarySource(Database db, LocalFolderResolver folders, IHttp
             var refreshed = db.GetArrInstance(instanceId);
             if (movies.Count > 0 && refreshed?.UnresolvedPathCount == 0)
                 db.PruneMoviesExcept(movies.Select(m => m.Folder), "radarr", instanceId);
+            if (themeReconciler is not null)
+                await themeReconciler.ReconcileMoviesAsync(movies, log, ct);
             return movies.Count;
         }
         catch (Exception ex)

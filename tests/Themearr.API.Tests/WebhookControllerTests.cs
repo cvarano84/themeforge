@@ -1,6 +1,7 @@
 using System.Text.Json;
 using Microsoft.AspNetCore.Mvc;
 using Themearr.API.Controllers;
+using Themearr.API.Data;
 using Themearr.API.Services;
 
 namespace Themearr.API.Tests;
@@ -46,8 +47,8 @@ public class WebhookControllerTests
 
     [Theory]
     [InlineData("Grab")]
-    [InlineData("Rename")]
     [InlineData("MovieDelete")]
+    [InlineData("MovieFileDelete")]
     [InlineData("Health")]
     public void Other_events_succeed_without_triggering_a_sync(string eventType)
     {
@@ -58,6 +59,39 @@ public class WebhookControllerTests
         // Must be 200: a 400 makes Radarr report the connection as failing.
         Assert.IsType<OkObjectResult>(result);
         Assert.True(registry.Trigger(AutoSyncService.SyncTaskId));
+    }
+
+    [Theory]
+    [InlineData("Import")]
+    [InlineData("Rename")]
+    [InlineData("MovieFileRename")]
+    public void Other_final_state_events_trigger_a_coalesced_sync(string eventType)
+    {
+        var (controller, registry) = New();
+
+        controller.Radarr(Body($$"""{"eventType":"{{eventType}}"}"""));
+        controller.Radarr(Body($$"""{"eventType":"{{eventType}}"}"""));
+
+        Assert.True(SyncPending(registry));
+    }
+
+    [Fact]
+    public void Upgrade_delete_is_not_queued_but_final_import_is()
+    {
+        using var temp = new TempDir();
+        var db = new Database(Path.Combine(temp.Path, "test.db"));
+        db.Init();
+        var queue = new RadarrWebhookReconciliationQueue(db);
+        var registry = new TaskRegistry();
+        registry.Register(AutoSyncService.SyncTaskId, "Sync Library", TimeSpan.FromHours(24));
+        var controller = new WebhookController(registry,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<WebhookController>.Instance, queue);
+
+        controller.Radarr(Body("""{"eventType":"MovieFileDelete","movie":{"tmdbId":603}}"""));
+        Assert.Empty(queue.Drain());
+
+        controller.Radarr(Body("""{"eventType":"Download","movie":{"tmdbId":603}}"""));
+        Assert.Single(queue.Drain());
     }
 
     [Fact]

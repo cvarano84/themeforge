@@ -34,6 +34,8 @@ builder.Services.AddSingleton<IYoutubeCookieStore, YoutubeCookieStore>();
 // filesystem than ThemeForge does.
 builder.Services.AddSingleton<LocalFolderResolver>();
 builder.Services.AddSingleton<LibraryPathRepairService>();
+builder.Services.AddSingleton<ThemeReconciliationService>();
+builder.Services.AddSingleton<RadarrWebhookReconciliationQueue>();
 builder.Services.AddSingleton<Themearr.API.Services.Sources.PlexLibrarySource>();
 builder.Services.AddSingleton<Themearr.API.Services.Sources.ILibrarySource>(
     sp => sp.GetRequiredService<Themearr.API.Services.Sources.PlexLibrarySource>());

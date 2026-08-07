@@ -13,7 +13,10 @@ namespace Themearr.API.Controllers;
 /// </summary>
 [ApiController]
 [Route("api/webhook")]
-public class WebhookController(TaskRegistry tasks, ILogger<WebhookController> log) : ControllerBase
+public class WebhookController(
+    TaskRegistry tasks,
+    ILogger<WebhookController> log,
+    RadarrWebhookReconciliationQueue? reconciliationQueue = null) : ControllerBase
 {
     // Radarr's payloads are a few KB; 64 KB is generous headroom over that and keeps a
     // caller from forcing the default 30 MB body through JsonDocument parsing.
@@ -43,18 +46,28 @@ public class WebhookController(TaskRegistry tasks, ILogger<WebhookController> lo
         if (eventType == "Test")
             return Ok(new { received = "Test", detail = $"{ProductBrand.Name} is reachable." });
 
-        // "Download" is Radarr's import event. Everything else — Grab, Rename,
-        // MovieDelete, Health — is acknowledged and ignored: returning anything but 200
-        // makes Radarr report the connection as failing and may disable it.
-        if (eventType != "Download")
+        // Download/Import and rename variants describe a final file location. Other
+        // events are acknowledged and ignored: returning anything but 200 makes Radarr
+        // report the connection as failing and may disable it.
+        // Only events that describe the final imported/renamed file are actionable.
+        // MovieFileDelete is deliberately excluded: during an upgrade it precedes the
+        // replacement import, and restoring at that point would race Radarr's cleanup.
+        var finalStateEvent = eventType.Equals("Download", StringComparison.OrdinalIgnoreCase)
+            || eventType.Equals("Import", StringComparison.OrdinalIgnoreCase)
+            || eventType.Equals("Rename", StringComparison.OrdinalIgnoreCase)
+            || eventType.Equals("MovieFileRename", StringComparison.OrdinalIgnoreCase);
+        if (!finalStateEvent)
             return Ok(new { received = eventType, detail = "Ignored." });
 
         // Signal the existing sync rather than inserting the movie here: the sync owns
         // resolving and upserting, and a second write path into the movie table would
         // drift. The trigger channel holds one slot, so a batch import that fires many
         // webhooks still produces a single sync.
+        reconciliationQueue?.Enqueue(payload);
         tasks.Trigger(AutoSyncService.SyncTaskId);
-        log.LogInformation("Radarr reported an import — library sync requested");
+        log.LogInformation(
+            "Radarr reported final-state event {EventType} — library sync and theme reconciliation requested",
+            LogSanitizer.Clean(eventType));
         return Ok(new { received = eventType, detail = "Sync requested." });
     }
 }

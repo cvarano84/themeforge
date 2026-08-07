@@ -175,6 +175,16 @@ public class AutoSyncService(
                 // IsRunning is read straight from SyncService via TaskRegistry's probe,
                 // so there is nothing here that needs to be cleared either.
                 log.LogInformation("AutoSync: sync already in progress, skipping");
+
+                // A webhook may arrive after the running sync already drained its
+                // affected-movie queue. Do not lose that final-state notification: wait
+                // for the current sync/lock to finish, then put one coalesced trigger
+                // back so the newly imported state is fetched and reconciled.
+                if (forced)
+                {
+                    await sync.Current.WaitAsync(ct);
+                    registry.Trigger(SyncTaskId);
+                }
             }
         }
         catch

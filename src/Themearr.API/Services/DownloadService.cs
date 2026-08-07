@@ -5,7 +5,8 @@ namespace Themearr.API.Services;
 
 public class DownloadService(
     IThemeAudioProvider provider, Database db, IHttpClientFactory httpClientFactory,
-    IConfiguration config, ILogger<DownloadService> log, LocalFolderResolver? folderResolver = null)
+    IConfiguration config, ILogger<DownloadService> log, LocalFolderResolver? folderResolver = null,
+    ThemeReconciliationService? themeReconciler = null)
 {
     private sealed record JobState(bool InProgress, bool Finished, string? Error, DateTime StartedAtUtc = default);
     private readonly ConcurrentDictionary<string, JobState> _jobs = new();
@@ -16,6 +17,9 @@ public class DownloadService(
         OperatingSystem.IsWindows() ? StringComparer.OrdinalIgnoreCase : StringComparer.Ordinal);
     private readonly DownloaderConfiguration _downloaderConfiguration = new(db);
     private readonly LocalFolderResolver _folders = folderResolver ?? new LocalFolderResolver(db);
+    private readonly ThemeReconciliationService _themeReconciler = themeReconciler
+        ?? new ThemeReconciliationService(db,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<ThemeReconciliationService>.Instance);
 
     private const int MaxLogLines = 300;
 
@@ -244,10 +248,11 @@ public class DownloadService(
             var outputPath = Path.Combine(folder, "theme.mp3");
 
             var locations = GetLogicalLocations(item, mediaType);
-            var existingTheme = locations
+            var existingTheme = mediaType == "show" ? locations
                 .OrderBy(location => InstancePriority(location))
                 .Select(location => ThemeFiles.FindThemeFile(location["folderName"]?.ToString() ?? ""))
-                .FirstOrDefault(path => path is not null && new FileInfo(path).Length > 0);
+                .FirstOrDefault(path => path is not null && new FileInfo(path).Length > 0) : null;
+            var destinationWasMissing = ThemeFiles.FindUsableThemeMp3(folder) is null;
 
             // Fail fast with an actionable message if the folder isn't writable — the
             // common Proxmox/LXC case where the themearr service user lacks permission
@@ -268,7 +273,18 @@ public class DownloadService(
             using var cts = new CancellationTokenSource(operationTimeout);
             var token = cts.Token;
 
-            if (!ThemeFiles.HasUsableTheme(folder) && existingTheme is not null)
+            var reusedRadarrTheme = false;
+            if (mediaType == "movie" && item["source"]?.ToString() == "radarr" && destinationWasMissing)
+            {
+                await _themeReconciler.ReconcileMovieAsync(item, message => AddLog(key, message), token);
+                reusedRadarrTheme = ThemeFiles.FindUsableThemeMp3(folder) is not null;
+            }
+
+            if (reusedRadarrTheme)
+            {
+                themeTitle = "Copied from existing Radarr location";
+            }
+            else if (mediaType == "show" && !ThemeFiles.HasUsableTheme(folder) && existingTheme is not null)
             {
                 AddLog(key, "[ThemeForge] Reusing an existing validated theme from another quality location…");
                 await ThemeFiles.CopyAtomicAsync(existingTheme, outputPath, replace: false, token);

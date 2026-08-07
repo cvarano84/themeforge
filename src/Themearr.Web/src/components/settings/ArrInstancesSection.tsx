@@ -93,7 +93,7 @@ export function ArrInstancesSection() {
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div><h2 className="text-base font-semibold text-[#F9FAFB]">Arr Instances</h2>
           <p className="mt-1 text-xs text-[#667085]">Configure each quality or category independently. Lower priority numbers are preferred.</p></div>
-        <div className="flex gap-2"><Button size="sm" onClick={() => add('radarr')}>Add Radarr</Button>
+        <div className="flex flex-col gap-2 min-[430px]:flex-row [&>*]:flex-1"><Button size="sm" onClick={() => add('radarr')}>Add Radarr</Button>
           <Button size="sm" variant="secondary" onClick={() => add('sonarr')}>Add Sonarr</Button></div>
       </div>
       {loading && <div className="py-6 flex justify-center"><Spinner size={20} /></div>}
@@ -110,7 +110,7 @@ export function ArrInstancesSection() {
                   <p className="mt-1 truncate text-xs text-[#667085]">{instance.url}</p></div>
                   <span className={`text-xs ${instance.health === 'healthy' ? 'text-[#32D583]' : instance.health === 'error' ? 'text-[#FDA29B]' : 'text-[#667085]'}`}>
                     {instance.health}</span></div>
-                <div className="grid grid-cols-2 gap-2 text-xs text-[#667085]">
+                <div className="grid grid-cols-1 gap-2 text-xs text-[#98A2B3] min-[360px]:grid-cols-2">
                   <span>Priority <b className="text-[#D0D5DD]">{instance.priority}</b></span>
                   <span>{instance.configured ? 'Configured' : 'API key required'}</span>
                   <span>Unresolved <b className="text-[#D0D5DD]">{instance.unresolvedPathCount}</b></span>
@@ -144,12 +144,12 @@ function Editor({ form, setForm, configured, saving, testing, onSave, onTest, on
   form: ArrInstanceInput; setForm: Dispatch<SetStateAction<ArrInstanceInput>>; configured: boolean
   saving: boolean; testing: boolean; onSave: () => void; onTest: () => void; onCancel: () => void
 }) {
-  const field = 'rounded-lg border border-[#344054] bg-[#101828] px-3 py-2 text-sm text-[#F9FAFB] outline-none focus:border-[#BB0000]'
+  const field = 'min-h-11 rounded-lg border border-[#344054] bg-[#101828] px-3 py-2 text-base text-[#F9FAFB] outline-none focus:border-[#BB0000] sm:text-sm'
   return <div className="rounded-lg border border-[#344054] bg-[#0C111D] p-4 space-y-4">
     <h3 className="font-medium text-[#F9FAFB]">{configured ? `Edit ${form.name}` : `Add ${form.serviceType === 'radarr' ? 'Radarr' : 'Sonarr'}`}</h3>
     <div className="grid gap-3 sm:grid-cols-2">
       <label className="flex flex-col gap-1 text-xs text-[#98A2B3]">Instance name<input className={field} value={form.name} onChange={e => setForm(f => ({ ...f, name: e.target.value }))} /></label>
-      <label className="flex flex-col gap-1 text-xs text-[#98A2B3]">URL<input className={field} placeholder={form.serviceType === 'radarr' ? 'http://radarr:7878' : 'http://sonarr:8989'} value={form.url} onChange={e => setForm(f => ({ ...f, url: e.target.value }))} /></label>
+      <label className="flex flex-col gap-1 text-xs text-[#98A2B3]">URL<input className={field} type="url" inputMode="url" autoCapitalize="none" placeholder={form.serviceType === 'radarr' ? 'http://radarr:7878' : 'http://sonarr:8989'} value={form.url} onChange={e => setForm(f => ({ ...f, url: e.target.value }))} /></label>
       <label className="flex flex-col gap-1 text-xs text-[#98A2B3]">API key<input className={field} type="password" autoComplete="new-password" placeholder={configured ? 'Leave blank to keep current key' : 'API key'} value={form.apiKey} onChange={e => setForm(f => ({ ...f, apiKey: e.target.value }))} /></label>
       <label className="flex flex-col gap-1 text-xs text-[#98A2B3]">Quality label<input className={field} placeholder="1080p, 4K, Anime…" value={form.qualityLabel} onChange={e => setForm(f => ({ ...f, qualityLabel: e.target.value }))} /></label>
       <label className="flex flex-col gap-1 text-xs text-[#98A2B3]">Priority<input className={field} type="number" value={form.priority} onChange={e => setForm(f => ({ ...f, priority: Number(e.target.value) }))} /></label>

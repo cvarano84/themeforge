@@ -152,18 +152,18 @@ export default function MoviesPage() {
     >
       {/* Stats row */}
       {movies.length > 0 && (
-        <div className="mb-5 flex gap-4">
+        <section aria-label="Movie library statistics" className="mb-5 grid grid-cols-1 gap-3 min-[360px]:grid-cols-3">
           {[
             { label: 'Total',      value: movies.length, color: '#98A2B3' },
             { label: 'Downloaded', value: downloaded,    color: '#12B76A' },
             { label: 'Pending',    value: pending,       color: '#F79009' },
           ].map(({ label, value, color }) => (
-            <div key={label} className="rounded-lg border border-[#1D2939] bg-[#101828] px-4 py-3">
-              <p className="text-xs text-[#667085]">{label}</p>
-              <p className="text-xl font-bold" style={{ color }}>{value}</p>
+            <div key={label} className="flex min-h-20 flex-col justify-center rounded-lg border border-[#1D2939] bg-[#101828] px-4 py-3">
+              <p className="text-xs font-medium text-[#98A2B3]">{label}</p>
+              <p className="text-xl font-bold tabular-nums" style={{ color }}>{value.toLocaleString()}</p>
             </div>
           ))}
-        </div>
+        </section>
       )}
 
       {/* Sync progress */}
@@ -185,7 +185,7 @@ export default function MoviesPage() {
 
       {/* A failed manual sync must not vanish silently. */}
       {syncError && (
-        <div className="mb-5 flex items-center justify-between gap-3 rounded-lg border border-[#B42318]/40 bg-[#FEF3F2]/5 px-4 py-3">
+        <div className="mb-5 flex flex-col gap-3 rounded-lg border border-[#B42318]/40 bg-[#FEF3F2]/5 px-4 py-3 min-[430px]:flex-row min-[430px]:items-center min-[430px]:justify-between">
           <p className="text-sm text-[#FDA29B]">Couldn&apos;t start sync: {syncError}</p>
           <Button variant="secondary" size="sm" onClick={startSync}>Retry</Button>
         </div>
@@ -218,7 +218,7 @@ export default function MoviesPage() {
       ) : (
         <>
           {refreshError && (
-            <div className="mb-5 flex items-center justify-between gap-3 rounded-lg border border-[#B42318]/40 bg-[#FEF3F2]/5 px-4 py-3">
+            <div className="mb-5 flex flex-col gap-3 rounded-lg border border-[#B42318]/40 bg-[#FEF3F2]/5 px-4 py-3 min-[430px]:flex-row min-[430px]:items-center min-[430px]:justify-between">
               <p className="text-sm text-[#FDA29B]">Couldn&apos;t refresh movies: {refreshError} — your list may be out of date.</p>
               <Button variant="secondary" size="sm" onClick={retryLoadMovies} loading={retrying}>Retry</Button>
             </div>

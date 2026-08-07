@@ -417,7 +417,7 @@ export default function QueuePage() {
         </div>
       }
     >
-      <div className="max-w-2xl space-y-5">
+      <div className="w-full max-w-2xl space-y-5">
         {mediaToggle}
 
         {moviesError && (
@@ -453,12 +453,11 @@ export default function QueuePage() {
                 <button
                   key={movie.id}
                   onClick={() => setCurrentIdx(currentIdx + 1 + i)}
-                  className="w-full flex items-center gap-3 px-4 py-2.5 hover:bg-[#1D2939]/60 transition-colors text-left"
+                  className="flex min-h-14 w-full items-center gap-3 px-4 py-2.5 text-left transition-colors hover:bg-[#1D2939]/60"
                 >
                   <span className="text-xs text-[#475467] w-4 flex-shrink-0">{i + 1}</span>
-                  <span className="text-sm text-[#D0D5DD] truncate flex-1">{movie.title}</span>
-                  {(movie.qualityLabels?.length ?? 0) > 0 && <span className="text-[10px] text-[#98A2B3]">{movie.qualityLabels!.join(' · ')}</span>}
-                  {movie.year && <span className="text-xs text-[#475467] flex-shrink-0">{movie.year}</span>}
+                  <span className="min-w-0 flex-1"><span className="line-clamp-2 text-sm leading-snug text-[#D0D5DD]">{movie.title}</span>{movie.year && <span className="mt-0.5 block text-xs text-[#98A2B3]">{movie.year}</span>}</span>
+                  {(movie.qualityLabels?.length ?? 0) > 0 && <span className="hidden text-[10px] text-[#98A2B3] min-[430px]:inline">{movie.qualityLabels!.join(' · ')}</span>}
                 </button>
               ))}
             </div>
@@ -529,7 +528,7 @@ export default function QueuePage() {
             )}
 
             {results.map(r => (
-              <div key={r.videoId} className={`flex items-center gap-3 px-4 py-3 transition-colors ${r.bestMatch ? 'bg-[#12B76A]/5 hover:bg-[#12B76A]/10' : 'hover:bg-[#0C111D]/60'}`}>
+            <div key={r.videoId} className={`flex flex-col items-stretch gap-3 px-4 py-3 transition-colors min-[430px]:flex-row min-[430px]:items-center ${r.bestMatch ? 'bg-[#12B76A]/5 hover:bg-[#12B76A]/10' : 'hover:bg-[#0C111D]/60'}`}>
                 {r.thumbnail && (
                   <img
                     src={r.thumbnail}
@@ -538,9 +537,9 @@ export default function QueuePage() {
                     loading="lazy"
                   />
                 )}
-                <div className="flex-1 min-w-0">
+                <div className="min-w-0 flex-1">
                   <div className="flex items-center gap-2 flex-wrap">
-                    <p className="text-sm font-medium text-[#F9FAFB] truncate">{r.title}</p>
+                    <p className="line-clamp-2 text-sm font-medium leading-snug text-[#F9FAFB]">{r.title}</p>
                     {r.bestMatch && (
                       <span className="flex-shrink-0 text-[10px] font-semibold text-[#12B76A] bg-[#12B76A]/15 px-1.5 py-0.5 rounded">
                         Best match
@@ -575,7 +574,7 @@ export default function QueuePage() {
         {!downloading && (
           <div className="rounded-xl border border-[#1D2939] bg-[#101828] p-4 space-y-3">
             <p className="text-xs font-semibold text-[#667085] uppercase tracking-wider">Paste YouTube URL</p>
-            <div className="flex gap-2">
+            <div className="flex flex-col gap-2 min-[430px]:flex-row">
               <Input
                 placeholder="https://www.youtube.com/watch?v=…"
                 value={manualUrl}

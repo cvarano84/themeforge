@@ -65,7 +65,7 @@ export default function HistoryPage() {
           <p className="text-sm text-[#667085]">Themes will appear here once downloaded</p>
         </div>
       ) : (
-        <div className="max-w-2xl space-y-4">
+        <div className="w-full space-y-4">
           {error && (
             <div className="rounded-lg border border-[#B42318]/40 bg-[#FEF3F2]/5 px-4 py-3">
               <p className="text-sm text-[#FDA29B]">Couldn&apos;t refresh history: {error}</p>
@@ -73,7 +73,7 @@ export default function HistoryPage() {
           )}
           {/* Search + filter toolbar */}
           <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-            <div className="relative">
+            <div className="relative w-full sm:w-64">
               <svg className="absolute left-3 top-1/2 -translate-y-1/2 text-[#475467]" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
                 <circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" />
               </svg>
@@ -81,15 +81,18 @@ export default function HistoryPage() {
                 value={search}
                 onChange={(e: { target: { value: string } }) => setSearch(e.target.value)}
                 placeholder="Search history…"
-                className="rounded-lg border border-[#344054] bg-[#101828] py-2 pl-9 pr-3.5 text-sm text-[#F9FAFB] placeholder:text-[#475467] outline-none focus:border-[#BB0000] focus:ring-1 focus:ring-[#BB0000]/40 w-56"
+                aria-label="Search history"
+                inputMode="search"
+                className="min-h-11 w-full rounded-lg border border-[#344054] bg-[#101828] py-2 pl-9 pr-3.5 text-base text-[#F9FAFB] placeholder:text-[#667085] outline-none focus:border-[#BB0000] focus:ring-1 focus:ring-[#BB0000]/40 sm:text-sm"
               />
             </div>
-            <div className="flex items-center gap-1 rounded-lg bg-[#101828] border border-[#1D2939] p-1">
+            <div className="-mx-1 overflow-x-auto px-1 pb-1"><div className="flex w-max items-center gap-1 rounded-lg border border-[#1D2939] bg-[#101828] p-1">
               {(['all', 'today', 'week', 'month'] as DateFilter[]).map(f => (
                 <button
                   key={f}
                   onClick={() => setDateFilter(f)}
-                  className={`rounded-md px-3 py-1.5 text-xs font-medium transition-all capitalize
+                  aria-pressed={dateFilter === f}
+                  className={`min-h-11 rounded-md px-3 py-1.5 text-xs font-medium transition-all capitalize
                     ${dateFilter === f
                       ? 'bg-[#1D2939] text-[#F9FAFB] shadow-sm'
                       : 'text-[#667085] hover:text-[#D0D5DD]'}`}
@@ -97,21 +100,21 @@ export default function HistoryPage() {
                   {f}
                 </button>
               ))}
-            </div>
+            </div></div>
           </div>
 
-          <p className="text-sm text-[#667085]">
+          <p className="text-sm text-[#98A2B3]">
             {filtered.length}{filtered.length !== entries.length ? ` of ${entries.length}` : ''} theme{entries.length !== 1 ? 's' : ''}
           </p>
 
           {filtered.length === 0 ? (
-            <p className="py-8 text-center text-sm text-[#475467]">No results match your filters.</p>
+            <p className="py-8 text-center text-sm text-[#98A2B3]">No results match your filters.</p>
           ) : (
           <div className="rounded-xl border border-[#1D2939] overflow-hidden">
             {filtered.map((entry, i) => (
               <div
                 key={entry.id}
-                className={`flex items-start gap-4 px-5 py-4 ${i < filtered.length - 1 ? 'border-b border-[#1D2939]' : ''}`}
+                className={`flex min-h-20 items-start gap-3 px-4 py-4 sm:gap-4 sm:px-5 ${i < filtered.length - 1 ? 'border-b border-[#1D2939]' : ''}`}
               >
                 {/* Icon */}
                 <div className="flex h-8 w-8 flex-shrink-0 items-center justify-center rounded-full bg-[#12B76A]/15 mt-0.5">
@@ -123,16 +126,16 @@ export default function HistoryPage() {
                 {/* Content */}
                 <div className="flex-1 min-w-0 space-y-0.5">
                   {/* Movie */}
-                  <p className="text-sm font-medium text-[#F9FAFB]">
+                  <p className="line-clamp-2 text-sm font-medium leading-snug text-[#F9FAFB]">
                     {entry.movieTitle}
                     {entry.movieYear && (
-                      <span className="ml-1.5 font-normal text-[#667085]">({entry.movieYear})</span>
+                      <span className="ml-1.5 font-normal text-[#98A2B3]">({entry.movieYear})</span>
                     )}
                   </p>
 
                   {/* Theme song */}
                   {entry.themeTitle && (
-                    <p className="text-xs text-[#D0D5DD] flex items-center gap-1">
+                    <p className="mt-1 flex items-start gap-1 text-xs leading-snug text-[#D0D5DD]">
                       <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" className="flex-shrink-0 text-[#475467]">
                         <path d="M9 18V5l12-2v13" />
                         <circle cx="6" cy="18" r="3" /><circle cx="18" cy="16" r="3" />
@@ -142,18 +145,18 @@ export default function HistoryPage() {
                           href={entry.sourceUrl}
                           target="_blank"
                           rel="noopener noreferrer"
-                          className="hover:text-[#CC3333] transition-colors truncate"
+                          className="line-clamp-2 min-h-11 py-1 text-[#F4AAAA] transition-colors hover:text-white"
                         >
                           {entry.themeTitle}
                         </a>
                       ) : (
-                        <span className="truncate">{entry.themeTitle}</span>
+                        <span className="line-clamp-2">{entry.themeTitle}</span>
                       )}
                     </p>
                   )}
 
                   {/* Date */}
-                  <p className="text-xs text-[#475467]">{formatDate(entry.downloadedAt)}</p>
+                  <p className="mt-1 text-xs text-[#98A2B3]">Downloaded · {formatDate(entry.downloadedAt)}</p>
                 </div>
               </div>
             ))}

@@ -15,9 +15,9 @@ const BTN_VARIANTS: Record<ButtonVariant, string> = {
 }
 
 const BTN_SIZES: Record<ButtonSize, string> = {
-  sm: 'px-3 py-1.5 text-xs h-8',
-  md: 'px-3.5 py-2 text-sm h-9',
-  lg: 'px-4 py-2.5 text-sm h-10',
+  sm: 'px-3 py-1.5 text-xs min-h-9',
+  md: 'px-3.5 py-2 text-sm min-h-11',
+  lg: 'px-4 py-2.5 text-sm min-h-12',
 }
 
 interface ButtonProps extends ButtonHTMLAttributes<HTMLButtonElement> {
@@ -59,7 +59,7 @@ export function Input({ label, hint, error, className = '', id, ...rest }: Input
       <input
         id={inputId}
         className={`
-          w-full rounded-lg border bg-[#101828] px-3.5 py-2.5 text-sm text-[#F9FAFB]
+          min-h-11 w-full rounded-lg border bg-[#101828] px-3.5 py-2.5 text-base text-[#F9FAFB] sm:text-sm
           placeholder:text-[#475467] outline-none transition-all
           border-[#344054] focus:border-[#BB0000] focus:ring-1 focus:ring-[#BB0000]/40
           disabled:opacity-50 disabled:cursor-not-allowed
@@ -116,12 +116,26 @@ const MODAL_SIZES = {
 
 export function Modal({ open, onClose, title, children, size = 'md' }: ModalProps) {
   const backdropRef = useRef<HTMLDivElement>(null)
+  const panelRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
     if (!open) return
-    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') onClose() }
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null
+    const previousOverflow = document.body.style.overflow
+    document.body.style.overflow = 'hidden'
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onClose()
+      if (e.key !== 'Tab' || !panelRef.current) return
+      const focusable = [...panelRef.current.querySelectorAll<HTMLElement>('a[href], button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])')]
+      if (!focusable.length) return
+      const first = focusable[0]
+      const last = focusable[focusable.length - 1]
+      if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus() }
+      else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus() }
+    }
     document.addEventListener('keydown', onKey)
-    return () => document.removeEventListener('keydown', onKey)
+    window.requestAnimationFrame(() => panelRef.current?.querySelector<HTMLElement>('button:not([disabled]), a[href], input:not([disabled]), select:not([disabled]), textarea:not([disabled])')?.focus())
+    return () => { document.body.style.overflow = previousOverflow; document.removeEventListener('keydown', onKey); previouslyFocused?.focus() }
   }, [open, onClose])
 
   if (!open) return null
@@ -135,13 +149,13 @@ export function Modal({ open, onClose, title, children, size = 'md' }: ModalProp
         onClick={onClose}
       />
       {/* panel */}
-      <div className={`relative z-10 w-full ${MODAL_SIZES[size]} rounded-xl border border-[#1D2939] bg-[#101828] shadow-2xl`}>
+      <div ref={panelRef} role="dialog" aria-modal="true" aria-label={title ?? 'Dialog'} className={`relative z-10 max-h-[calc(100dvh-2rem)] w-full overflow-y-auto ${MODAL_SIZES[size]} rounded-xl border border-[#1D2939] bg-[#101828] shadow-2xl`}>
         {title && (
           <div className="flex items-center justify-between border-b border-[#1D2939] px-6 py-4">
             <h2 className="text-base font-semibold text-[#F9FAFB]">{title}</h2>
             <button
               onClick={onClose}
-              className="rounded-lg p-1.5 text-[#667085] hover:bg-[#1D2939] hover:text-[#D0D5DD] transition-colors"
+              className="flex min-h-11 min-w-11 items-center justify-center rounded-lg p-1.5 text-[#98A2B3] hover:bg-[#1D2939] hover:text-[#D0D5DD] transition-colors"
               aria-label="Close"
             >
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round">

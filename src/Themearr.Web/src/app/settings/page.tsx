@@ -697,7 +697,7 @@ export default function SettingsPage() {
                     {plexTest.detail}
                   </div>
                 )}
-                <div className="flex gap-2">
+                <div className="flex flex-col gap-2 min-[430px]:flex-row [&>*]:flex-1">
                   <Button
                     variant="secondary"
                     size="sm"
@@ -796,6 +796,9 @@ export default function SettingsPage() {
             <div className="space-y-3">
               <Input
                 label="Radarr URL"
+                type="url"
+                inputMode="url"
+                autoCapitalize="none"
                 placeholder="http://localhost:7878"
                 value={radarrUrl}
                 onChange={e => { setRadarrUrl(e.target.value); setRadarrTestResult(null) }}
@@ -817,7 +820,7 @@ export default function SettingsPage() {
                   {radarrTestResult.detail}
                 </div>
               )}
-              <div className="flex gap-2">
+              <div className="flex flex-col gap-2 min-[430px]:flex-row [&>*]:flex-1">
                 <Button
                   variant="secondary"
                   size="sm"
@@ -891,7 +894,7 @@ export default function SettingsPage() {
 
           {showSource === 'sonarr' && (
             <div className="space-y-3">
-              <Input label="Sonarr URL" placeholder="http://localhost:8989" value={sonarrUrl}
+              <Input label="Sonarr URL" type="url" inputMode="url" autoCapitalize="none" placeholder="http://localhost:8989" value={sonarrUrl}
                 onChange={e => { setSonarrUrl(e.target.value); setSonarrTestResult(null) }} />
               <Input label="API key" type="password"
                 placeholder={sonarrConfigured ? 'Leave blank to keep the current key' : 'Sonarr API key…'}
@@ -933,7 +936,7 @@ export default function SettingsPage() {
         {/* API key */}
         <Section title="API Key" hint="Used by Radarr and scripts to authenticate with ThemeForge. This is not the access token you sign in with.">
           {apiKeyLoadError && (
-            <div className="flex items-center justify-between gap-3 rounded-lg border border-[#B42318]/40 bg-[#FEF3F2]/5 px-4 py-3">
+            <div className="flex flex-col gap-3 rounded-lg border border-[#B42318]/40 bg-[#FEF3F2]/5 px-4 py-3 min-[430px]:flex-row min-[430px]:items-center min-[430px]:justify-between">
               <p className="text-sm text-[#FDA29B]">Couldn&apos;t load the API key: {apiKeyLoadError}</p>
               <Button variant="secondary" size="sm" onClick={loadApiKey}>Retry</Button>
             </div>
@@ -945,13 +948,13 @@ export default function SettingsPage() {
 
           {apiKeyLoaded && (
             <div className="space-y-3">
-              <div className="flex gap-2 items-end">
+              <div className="flex flex-col gap-2 min-[430px]:flex-row min-[430px]:items-end">
                 <div ref={keyFieldRef} className="flex-1">
                   <Input label="Key" readOnly value={apiKey} className="flex-1 font-mono text-xs" />
                 </div>
                 <Button variant="secondary" size="sm" onClick={copyApiKey}>{keyCopied ? 'Copied ✓' : 'Copy'}</Button>
               </div>
-              <div className="flex gap-2 items-end">
+              <div className="flex flex-col gap-2 min-[430px]:flex-row min-[430px]:items-end">
                 <div ref={webhookFieldRef} className="flex-1">
                   <Input label="Radarr webhook URL" readOnly value={webhookUrl} className="flex-1 font-mono text-xs" />
                 </div>
@@ -1219,7 +1222,7 @@ export default function SettingsPage() {
 
         {/* Advanced */}
         <Section title="Advanced">
-          <div className="grid grid-cols-2 gap-4">
+          <div className="grid grid-cols-1 gap-4 min-[360px]:grid-cols-2">
             <Input
               label="Max search directories"
               type="number"
@@ -1250,7 +1253,7 @@ export default function SettingsPage() {
         {/* Version / update */}
         {version && (
           <Section title="Updates">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col gap-4 min-[430px]:flex-row min-[430px]:items-center min-[430px]:justify-between">
               <div className="space-y-0.5">
                 <p className="text-sm text-[#D0D5DD]">
                   Current: <span className="font-mono text-[#F9FAFB]">{version.current}</span>
@@ -1264,7 +1267,7 @@ export default function SettingsPage() {
                   </p>
                 )}
               </div>
-              <div className="flex items-center gap-2">
+              <div className="flex flex-col gap-2 min-[430px]:flex-row">
                 <Button variant="ghost" size="sm" onClick={checkForUpdates} loading={checking}>
                   Check for updates
                 </Button>
@@ -1284,7 +1287,7 @@ export default function SettingsPage() {
           // error screen -- and it doesn't reuse "Check for updates" (that
           // action belongs to a working version load, not a failed one).
           <Section title="Updates">
-            <div className="flex items-center justify-between gap-3">
+            <div className="flex flex-col gap-3 min-[430px]:flex-row min-[430px]:items-center min-[430px]:justify-between">
               <p className="text-sm text-[#667085]">Couldn&apos;t check the current version: {versionLoadError}</p>
               <Button variant="secondary" size="sm" onClick={loadVersion}>Retry</Button>
             </div>
@@ -1364,7 +1367,7 @@ export default function SettingsPage() {
 
         {/* Danger zone */}
         <Section title="Danger zone">
-          <div className="flex items-center justify-between rounded-lg border border-[#B42318]/30 px-4 py-3">
+          <div className="flex flex-col gap-4 rounded-lg border border-[#B42318]/30 bg-[#B42318]/5 px-4 py-4 min-[430px]:flex-row min-[430px]:items-center min-[430px]:justify-between">
             <div>
               <p className="text-sm font-medium text-[#F9FAFB]">Reset {APP_BRAND.name}</p>
               <p className="text-xs text-[#667085]">Wipes all settings and movie data</p>
@@ -1381,18 +1384,19 @@ function ToggleRow({ label, hint, checked, onChange }: {
   label: string; hint?: string; checked: boolean; onChange: () => void
 }) {
   return (
-    <div className="flex items-center justify-between gap-4">
+    <div className="flex min-h-11 items-center justify-between gap-4">
       <div className="space-y-0.5">
         <p className="text-sm font-medium text-[#F9FAFB]">{label}</p>
         {hint && <p className="text-xs text-[#667085]">{hint}</p>}
       </div>
       <button
         role="switch"
+        aria-label={label}
         aria-checked={checked}
         onClick={onChange}
-        className={`relative inline-flex h-6 w-11 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors focus:outline-none ${checked ? 'bg-[#BB0000]' : 'bg-[#344054]'}`}
+        className={`relative inline-flex h-11 w-14 flex-shrink-0 cursor-pointer items-center rounded-full border-[10px] border-transparent bg-clip-padding transition-colors ${checked ? 'bg-[#BB0000]' : 'bg-[#344054]'}`}
       >
-        <span className={`pointer-events-none inline-block h-5 w-5 transform rounded-full bg-white shadow transition-transform ${checked ? 'translate-x-5' : 'translate-x-0'}`} />
+        <span className={`pointer-events-none inline-block h-5 w-5 flex-none transform rounded-full bg-white shadow transition-transform ${checked ? 'translate-x-4' : 'translate-x-0'}`} />
       </button>
     </div>
   )
@@ -1420,12 +1424,12 @@ function DownloaderStatus({ label, available, version, optional = false }: {
 
 function Section({ title, hint, children }: { title: string; hint?: string; children: React.ReactNode }) {
   return (
-    <div className="rounded-xl border border-[#1D2939] bg-[#101828] p-5 space-y-4">
+    <section className="space-y-4 rounded-xl border border-[#1D2939] bg-[#101828] p-4 sm:p-5">
       <div>
         <h2 className="text-sm font-semibold text-[#F9FAFB]">{title}</h2>
         {hint && <p className="mt-0.5 text-xs text-[#667085]">{hint}</p>}
       </div>
       {children}
-    </div>
+    </section>
   )
 }

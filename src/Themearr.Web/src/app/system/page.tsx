@@ -3,6 +3,8 @@ import { systemApi } from '@/lib/api'
 import type { HealthResponse, SystemTask } from '@/lib/types'
 import { AppShell } from '@/components/layout/AppShell'
 import { Button, EmptyState, Spinner } from '@/components/ui'
+import { MobileDataCard } from '@/components/data/MobileDataCard'
+import { useMediaQuery } from '@/lib/useMediaQuery'
 
 type Tab = 'health' | 'tasks'
 
@@ -62,6 +64,7 @@ export default function SystemPage() {
   const [tasksError,  setTasksError]  = useState(false)
   const [running,     setRunning]     = useState<string | null>(null)
   const [error,       setError]       = useState('')
+  const useDesktopTaskTable = useMediaQuery('(min-width: 64rem)', true)
 
   // Initial loads: distinguish "never loaded" (null), "loaded, nothing to
   // report" ([] with no error) and "failed to load" (*Error) from each other.
@@ -107,7 +110,7 @@ export default function SystemPage() {
 
   return (
     <AppShell title="System">
-      <div role="tablist" className="mb-5 flex gap-1 border-b border-[#1D2939]">
+      <div role="tablist" aria-label="System information" className="mb-5 flex gap-1 overflow-x-auto border-b border-[#1D2939]">
         {(['health', 'tasks'] as Tab[]).map(t => (
           <button
             key={t}
@@ -117,7 +120,7 @@ export default function SystemPage() {
             aria-selected={tab === t}
             aria-controls={`system-panel-${t}`}
             onClick={() => setTab(t)}
-            className={`px-4 py-2 text-sm font-medium capitalize transition-colors ${
+            className={`min-h-11 px-4 py-2 text-sm font-medium capitalize transition-colors ${
               tab === t
                 ? 'border-b-2 border-[#BB0000] text-[#F9FAFB]'
                 : 'text-[#667085] hover:text-[#D0D5DD]'
@@ -129,7 +132,7 @@ export default function SystemPage() {
       </div>
 
       {error && (
-        <p className="mb-4 rounded-lg bg-[#F04438]/10 px-3 py-2 text-sm text-[#FDA29B]">{error}</p>
+        <p role="alert" className="mb-4 rounded-lg bg-[#F04438]/10 px-3 py-2 text-sm text-[#FDA29B]">{error}</p>
       )}
 
       {tab === 'health' && (
@@ -147,7 +150,7 @@ export default function SystemPage() {
           ) : health.checks.length === 0 ? (
             <div className="rounded-xl border border-[#1D2939] bg-[#101828] px-4 py-8 text-center">
               <p className="text-sm font-medium text-[#6CE9A6]">All health checks are passing</p>
-              <p className="mt-1 text-xs text-[#667085]">
+              <p className="mt-1 text-xs text-[#98A2B3]">
                 Only problems are listed here, so an empty page is good news.
               </p>
             </div>
@@ -174,7 +177,7 @@ export default function SystemPage() {
                           href={c.wikiUrl}
                           target="_blank"
                           rel="noreferrer"
-                          className="mt-1.5 inline-block text-xs text-[#E07777] hover:underline"
+                          className="mt-2 inline-flex min-h-11 items-center rounded-lg px-2 text-sm font-semibold text-[#F4AAAA] hover:bg-[#1D2939] hover:text-white"
                         >
                           How to fix this →
                         </a>
@@ -201,8 +204,9 @@ export default function SystemPage() {
               <Spinner size={28} className="text-[#BB0000]" />
             </div>
           ) : tasks.length === 0 ? (
-            <p className="text-sm text-[#667085]">No scheduled tasks are registered yet.</p>
+            <div className="flex min-h-32 items-center justify-center rounded-xl border border-[#1D2939] bg-[#101828] p-4 text-center"><p className="text-sm text-[#98A2B3]">No scheduled tasks are registered yet.</p></div>
           ) : (
+            useDesktopTaskTable ? (
             <div className="overflow-x-auto rounded-xl border border-[#1D2939]">
               <table className="w-full min-w-[640px] text-sm">
                 <thead className="bg-[#101828] text-left text-xs uppercase tracking-wide text-[#667085]">
@@ -225,21 +229,31 @@ export default function SystemPage() {
                       <td className="px-4 py-3 text-[#D0D5DD]">{relative(t.lastRunUtc)}</td>
                       <td className="px-4 py-3 text-[#D0D5DD]">{relative(t.nextRunUtc)}</td>
                       <td className="px-4 py-3 text-right">
-                        <Button
-                          size="sm"
-                          variant="secondary"
-                          loading={running === t.id}
-                          disabled={t.isRunning || running === t.id}
-                          onClick={() => runTask(t.id)}
-                        >
-                          {t.isRunning ? 'Running' : 'Run now'}
-                        </Button>
+                        <Button size="sm" variant="secondary" loading={running === t.id} disabled={t.isRunning || running === t.id} onClick={() => runTask(t.id)}>{t.isRunning ? 'Running' : 'Run now'}</Button>
                       </td>
                     </tr>
                   ))}
                 </tbody>
               </table>
             </div>
+            ) : (
+            <div className="space-y-3">
+              {tasks.map(t => (
+                <MobileDataCard
+                  key={t.id}
+                  title={t.name}
+                  subtitle={t.lastResult}
+                  status={<span className={`rounded-full px-2 py-1 text-xs font-semibold ${t.isRunning ? 'bg-[#F79009]/15 text-[#FEC84B]' : 'bg-[#12B76A]/15 text-[#6CE9A6]'}`}>{t.isRunning ? 'Running' : 'Scheduled'}</span>}
+                  fields={[
+                    { label: 'Interval', value: formatInterval(t.interval) },
+                    { label: 'Last run', value: relative(t.lastRunUtc) },
+                    { label: 'Next run', value: relative(t.nextRunUtc) },
+                  ]}
+                  actions={<Button className="w-full" variant="secondary" loading={running === t.id} disabled={t.isRunning || running === t.id} onClick={() => runTask(t.id)}>{t.isRunning ? 'Running' : 'Run now'}</Button>}
+                />
+              ))}
+            </div>
+            )
           )}
         </div>
       )}

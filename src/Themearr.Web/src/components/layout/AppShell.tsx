@@ -1,6 +1,8 @@
-import { useEffect, type ReactNode } from 'react'
+import { useEffect, useRef, useState, type ReactNode } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Sidebar } from './Sidebar'
+import { MobileHeader, MobileNavigationDrawer } from './MobileNavigation'
+import { useNavigationMeta } from './useNavigationMeta'
 import { useAuth } from '@/lib/auth'
 import { Spinner } from '@/components/ui'
 
@@ -13,6 +15,9 @@ interface AppShellProps {
 export function AppShell({ children, title, actions }: AppShellProps) {
   const navigate = useNavigate()
   const { loading, authorized } = useAuth()
+  const [navigationOpen, setNavigationOpen] = useState(false)
+  const menuRef = useRef<HTMLButtonElement>(null)
+  const navigationMeta = useNavigationMeta(authorized)
 
   // Route guard: kick anyone without a valid bearer token back to /login.
   // The api.ts 401 handler catches expired tokens mid-session; this handles
@@ -30,21 +35,25 @@ export function AppShell({ children, title, actions }: AppShellProps) {
   }
 
   return (
-    <div className="flex min-h-screen">
-      <Sidebar />
-      <div className="flex flex-1 flex-col" style={{ marginLeft: 'var(--sidebar-w)' }}>
+    <div className="tf-app-shell">
+      <Sidebar meta={navigationMeta} />
+      <div className="tf-content-shell">
+        <MobileHeader title={title} onMenu={() => setNavigationOpen(true)} menuRef={menuRef} />
         {(title || actions) && (
-          <header className="sticky top-0 z-20 flex h-16 items-center justify-between gap-4 border-b border-[#1D2939] bg-[#0C111D]/90 px-6 backdrop-blur">
+          <header className="tf-page-header">
             {title && (
-              <h1 className="text-base font-semibold text-[#F9FAFB]">{title}</h1>
+              <h1 className="tf-desktop-page-title">{title}</h1>
             )}
-            {actions && <div className="flex items-center gap-2">{actions}</div>}
+            {actions && <div className="tf-page-actions">{actions}</div>}
           </header>
         )}
-        <main className="flex-1 px-6 py-6">
-          <div className="mx-auto w-full max-w-[1024px]">{children}</div>
+        <main id="main-content" tabIndex={-1} className="tf-main-content">
+          <div className="mx-auto w-full max-w-[1024px]">
+            {children}
+          </div>
         </main>
       </div>
+      <MobileNavigationDrawer open={navigationOpen} onClose={() => setNavigationOpen(false)} triggerRef={menuRef} meta={navigationMeta} />
     </div>
   )
 }

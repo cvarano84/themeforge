@@ -1,8 +1,9 @@
 import { useEffect, useRef, useState } from 'react'
 import type { MediaItem, MediaStatus } from '@/lib/types'
 import type { MediaAdapter } from '@/lib/media/adapter'
-import { Button, EmptyState, Spinner } from '@/components/ui'
+import { Button, EmptyState, Modal, Spinner } from '@/components/ui'
 import { SearchModal } from './SearchModal'
+import { MobileActionBar } from '@/components/data/MobileActionBar'
 
 interface MediaGridProps {
   items: MediaItem[]
@@ -31,6 +32,10 @@ export function MediaGrid({ items, adapter, onUpdated, emptyDescription }: Media
   const [quality,  setQuality]  = useState('all')
   const [instance, setInstance] = useState('all')
   const [selected, setSelected] = useState<MediaItem | null>(null)
+  const [selectionMode, setSelectionMode] = useState(false)
+  const [selectedIds, setSelectedIds] = useState<Set<string>>(() => new Set())
+  const [bulkBusy, setBulkBusy] = useState(false)
+  const [bulkError, setBulkError] = useState('')
 
   const effectiveStatus = (item: MediaItem) => item.aggregateStatus ?? item.status
   const countOf = (s: Exclude<Filter, 'all'>) => items.filter(i => effectiveStatus(i) === s).length
@@ -49,6 +54,32 @@ export function MediaGrid({ items, adapter, onUpdated, emptyDescription }: Media
   })
   const qualities = [...new Set(items.flatMap(i => (i.locations ?? []).map(l => l.qualityLabel).filter((x): x is string => !!x)))].sort()
   const instances = [...new Map(items.flatMap(i => (i.locations ?? []).filter(l => l.instanceId).map(l => [l.instanceId!, l.instanceName ?? l.instanceId!] as const))).entries()]
+
+  function toggleSelected(id: string) {
+    setSelectedIds(current => {
+      const next = new Set(current)
+      if (next.has(id)) next.delete(id); else next.add(id)
+      return next
+    })
+  }
+
+  function clearSelection() {
+    setSelectedIds(new Set())
+    setSelectionMode(false)
+    setBulkError('')
+  }
+
+  async function ignoreSelected() {
+    setBulkBusy(true)
+    setBulkError('')
+    const ids = [...selectedIds]
+    const results = await Promise.allSettled(ids.map(id => adapter.ignore(id)))
+    results.forEach((result, index) => { if (result.status === 'fulfilled') onUpdated(ids[index], 'ignored') })
+    const failed = results.filter(result => result.status === 'rejected').length
+    if (failed) setBulkError(`${failed} ${adapter.labels.plural.slice(0, -1)}${failed === 1 ? '' : 's'} could not be ignored.`)
+    else clearSelection()
+    setBulkBusy(false)
+  }
 
   // Render the grid in windows so a large library (1000s of movies) never mounts
   // every card at once — that DOM/layout cost, not the data, is what made these
@@ -84,8 +115,9 @@ export function MediaGrid({ items, adapter, onUpdated, emptyDescription }: Media
   return (
     <>
       {/* Toolbar */}
-      <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
-        <div className="flex items-center gap-1 rounded-lg bg-[#101828] border border-[#1D2939] p-1 flex-wrap">
+      <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-start sm:justify-between">
+        <div className="-mx-1 overflow-x-auto px-1 pb-1" aria-label="Status filters">
+        <div className="flex w-max items-center gap-1 rounded-lg border border-[#1D2939] bg-[#101828] p-1">
           {([
             ['all', `All (${items.length - ignored})`],
             // Driven by the adapter, so shows get a Plex theme chip and movies don't.
@@ -101,7 +133,8 @@ export function MediaGrid({ items, adapter, onUpdated, emptyDescription }: Media
             <button
               key={val}
               onClick={() => setFilter(val)}
-              className={`rounded-md px-3 py-1.5 text-xs font-medium transition-all
+              aria-pressed={filter === val}
+              className={`min-h-11 whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-all
                 ${filter === val
                   ? 'bg-[#1D2939] text-[#F9FAFB] shadow-sm'
                   : 'text-[#667085] hover:text-[#D0D5DD]'}`}
@@ -109,16 +142,17 @@ export function MediaGrid({ items, adapter, onUpdated, emptyDescription }: Media
               {label}
             </button>
           ))}
-        </div>
+        </div></div>
 
-        <div className="flex flex-wrap gap-2">
-          {instances.length > 0 && <select aria-label="Filter by instance" value={instance} onChange={e => setInstance(e.target.value)} className="rounded-lg border border-[#344054] bg-[#101828] px-2 py-2 text-xs text-[#D0D5DD]">
+        <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:flex-wrap">
+          <button type="button" aria-pressed={selectionMode} onClick={() => { setSelectionMode(value => !value); setSelectedIds(new Set()); setBulkError('') }} className="min-h-11 rounded-lg border border-[#344054] bg-[#101828] px-3 text-sm font-semibold text-[#D0D5DD] hover:border-[#667085] hover:text-white">{selectionMode ? 'Cancel selection' : 'Select'}</button>
+          {instances.length > 0 && <select aria-label="Filter by instance" value={instance} onChange={e => setInstance(e.target.value)} className="min-h-11 rounded-lg border border-[#344054] bg-[#101828] px-3 py-2 text-base text-[#D0D5DD] sm:text-xs">
             <option value="all">All instances</option>{instances.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
           </select>}
-          {qualities.length > 0 && <select aria-label="Filter by quality" value={quality} onChange={e => setQuality(e.target.value)} className="rounded-lg border border-[#344054] bg-[#101828] px-2 py-2 text-xs text-[#D0D5DD]">
+          {qualities.length > 0 && <select aria-label="Filter by quality" value={quality} onChange={e => setQuality(e.target.value)} className="min-h-11 rounded-lg border border-[#344054] bg-[#101828] px-3 py-2 text-base text-[#D0D5DD] sm:text-xs">
             <option value="all">All qualities</option>{qualities.map(label => <option key={label}>{label}</option>)}
           </select>}
-        <div className="relative">
+        <div className="relative min-w-0 flex-1 sm:w-56">
           <svg className="absolute left-3 top-1/2 -translate-y-1/2 text-[#475467]" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
             <circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" />
           </svg>
@@ -126,7 +160,9 @@ export function MediaGrid({ items, adapter, onUpdated, emptyDescription }: Media
             value={search}
             onChange={e => setSearch(e.target.value)}
             placeholder={adapter.labels.searchPlaceholder}
-            className="rounded-lg border border-[#344054] bg-[#101828] py-2 pl-9 pr-3.5 text-sm text-[#F9FAFB] placeholder:text-[#475467] outline-none focus:border-[#BB0000] focus:ring-1 focus:ring-[#BB0000]/40 w-56"
+            aria-label={`Search ${adapter.labels.plural}`}
+            inputMode="search"
+            className="min-h-11 w-full rounded-lg border border-[#344054] bg-[#101828] py-2 pl-9 pr-3.5 text-base text-[#F9FAFB] placeholder:text-[#667085] outline-none focus:border-[#BB0000] focus:ring-1 focus:ring-[#BB0000]/40 sm:text-sm"
           />
         </div>
         </div>
@@ -146,12 +182,14 @@ export function MediaGrid({ items, adapter, onUpdated, emptyDescription }: Media
         />
       ) : (
         <>
-          <div className="grid grid-cols-3 gap-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-10">
+          <div className="grid grid-cols-2 gap-4 min-[430px]:grid-cols-3 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6 xl:grid-cols-8 2xl:grid-cols-10">
             {shown.map(item => (
               <MediaCard
                 key={item.id}
                 item={item}
-                onClick={() => setSelected(item)}
+                selectionMode={selectionMode}
+                checked={selectedIds.has(item.id)}
+                onClick={() => selectionMode ? toggleSelected(item.id) : setSelected(item)}
               />
             ))}
           </div>
@@ -171,6 +209,8 @@ export function MediaGrid({ items, adapter, onUpdated, emptyDescription }: Media
           onUpdated={(id, status) => { onUpdated(id, status); setSelected(null) }}
         />
       )}
+      {bulkError && <p role="alert" className="mt-4 rounded-lg border border-[#B42318]/40 bg-[#FEF3F2]/5 px-4 py-3 text-sm text-[#FDA29B]">{bulkError}</p>}
+      <MobileActionBar count={selectedIds.size} itemLabel={adapter.labels.plural.slice(0, -1)} primaryLabel="Ignore selected" onPrimary={() => void ignoreSelected()} onClear={clearSelection} busy={bulkBusy} />
     </>
   )
 }
@@ -225,23 +265,8 @@ function MediaActionModal({ item, adapter, onClose, onUpdated }: {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4">
-      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={onClose} />
-      <div className="relative w-full max-w-sm rounded-xl border border-[#1D2939] bg-[#101828] shadow-2xl overflow-hidden">
-        {/* Header */}
-        <div className="flex items-center justify-between border-b border-[#1D2939] px-5 py-4">
-          <div className="min-w-0">
-            <h2 className="text-sm font-semibold text-[#F9FAFB] truncate">{item.title}</h2>
-            {item.year && <p className="text-xs text-[#667085]">{item.year}</p>}
-          </div>
-          <button onClick={onClose} className="ml-3 flex-shrink-0 text-[#667085] hover:text-[#D0D5DD] transition-colors">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round">
-              <path d="M18 6 6 18M6 6l12 12" />
-            </svg>
-          </button>
-        </div>
-
-        <div className="p-5 space-y-4">
+    <Modal open onClose={onClose} title={`${item.title}${item.year ? ` (${item.year})` : ''}`} size="sm">
+        <div className="space-y-4">
           {(item.locations?.length ?? 0) > 1 && <div className="space-y-2">
             <p className="text-xs font-semibold uppercase tracking-wider text-[#667085]">Quality locations</p>
             {item.locations!.map(location => <div key={location.id} className="flex items-center justify-between gap-3 rounded-lg border border-[#1D2939] px-3 py-2 text-xs">
@@ -324,14 +349,13 @@ function MediaActionModal({ item, adapter, onClose, onUpdated }: {
             </div>
           )}
         </div>
-      </div>
-    </div>
+    </Modal>
   )
 }
 
 // ── Media card ─────────────────────────────────────────────────────────────────
 
-function MediaCard({ item, onClick }: { item: MediaItem; onClick: () => void }) {
+function MediaCard({ item, onClick, selectionMode, checked }: { item: MediaItem; onClick: () => void; selectionMode: boolean; checked: boolean }) {
   const [imgError, setImgError] = useState(false)
   const isPending   = item.status === 'pending' || item.aggregateStatus === 'missing'
   const isIgnored   = item.status === 'ignored'
@@ -342,10 +366,13 @@ function MediaCard({ item, onClick }: { item: MediaItem; onClick: () => void }) 
   return (
     <button
       onClick={onClick}
-      className="group relative flex flex-col text-left focus:outline-none cursor-pointer"
+      aria-pressed={selectionMode ? checked : undefined}
+      aria-label={`${checked ? 'Deselect' : selectionMode ? 'Select' : 'Open actions for'} ${item.title}${item.year ? `, ${item.year}` : ''}`}
+      className="group relative flex min-h-11 flex-col rounded-lg text-left cursor-pointer focus-visible:ring-2 focus-visible:ring-[#F4AAAA] focus-visible:ring-offset-2 focus-visible:ring-offset-[#0C111D]"
     >
       {/* Poster */}
       <div className={`relative w-full overflow-hidden rounded-lg bg-[#1D2939] ${isIgnored ? 'opacity-40' : ''}`} style={{ aspectRatio: '2/3' }}>
+        {selectionMode && <span className={`absolute left-2 top-2 z-10 flex h-7 w-7 items-center justify-center rounded-full border-2 ${checked ? 'border-[#F4AAAA] bg-[#BB0000] text-white' : 'border-[#D0D5DD] bg-[#101828]/90 text-transparent'}`} aria-hidden="true"><svg width="14" height="14" viewBox="0 0 12 12" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><path d="M2 6l3 3 5-5" /></svg></span>}
         {item.posterUrl && !imgError ? (
           <img
             src={item.posterUrl}
@@ -365,7 +392,7 @@ function MediaCard({ item, onClick }: { item: MediaItem; onClick: () => void }) 
         )}
 
         {/* Hover overlay */}
-        <div className="absolute inset-0 flex items-center justify-center rounded-lg bg-black/60 opacity-0 transition-opacity duration-200 group-hover:opacity-100">
+        <div className="absolute inset-0 hidden items-center justify-center rounded-lg bg-black/60 opacity-0 transition-opacity duration-200 group-hover:opacity-100 group-focus-visible:opacity-100 sm:flex">
           <div className={`flex items-center gap-1.5 rounded-md px-3 py-1.5 text-xs font-medium text-white ${isPending ? 'bg-[#BB0000]' : isIgnored ? 'bg-[#344054]' : 'bg-[#1D2939]'}`}>
             {isPending   && <><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.35-4.35" /></svg>Get theme</>}
             {isIgnored   && <>Ignored</>}
@@ -408,8 +435,8 @@ function MediaCard({ item, onClick }: { item: MediaItem; onClick: () => void }) 
 
       {/* Title + year */}
       <div className="mt-1.5 px-0.5">
-        <p className={`truncate text-xs font-medium ${isIgnored ? 'text-[#475467]' : 'text-[#D0D5DD]'}`}>{item.title}</p>
-        {item.year && <p className="text-[11px] text-[#475467]">{item.year}</p>}
+        <p className={`line-clamp-2 text-sm font-medium leading-snug sm:text-xs ${isIgnored ? 'text-[#98A2B3]' : 'text-[#D0D5DD]'}`}>{item.title}</p>
+        {item.year && <p className="mt-1 text-xs text-[#98A2B3]">{item.year}</p>}
         {(item.qualityLabels?.length ?? 0) > 0 && <div className="mt-1 flex flex-wrap gap-1">{item.qualityLabels!.map(label => <span key={label} className="rounded bg-[#1D2939] px-1 text-[9px] text-[#98A2B3]">{label}</span>)}</div>}
       </div>
     </button>

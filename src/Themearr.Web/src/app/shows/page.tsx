@@ -115,7 +115,7 @@ export default function ShowsPage() {
           title="Show source is not configured"
           description="Choose Plex TV libraries or configure Sonarr in Settings."
           action={
-            <Link to="/settings" className="text-sm text-[#CC3333] hover:underline">
+            <Link to="/settings" className="inline-flex min-h-11 items-center rounded-lg px-3 text-sm font-semibold text-[#F4AAAA] hover:bg-[#1D2939]">
               Choose them in Settings →
             </Link>
           }

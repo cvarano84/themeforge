@@ -55,15 +55,31 @@
 /* ─── CSS variables for theming ──────────────────────────────────────────── */
 :root {
   --sidebar-w: 260px;
+  /* Layout changes when a 260px rail still leaves a useful reading width. */
+  --layout-nav-breakpoint: 64rem;
+  --space-page-mobile: 1rem;
+  --space-page-desktop: 1.5rem;
+  --control-min-size: 2.75rem;
+  --mobile-header-height: 3.75rem;
+  --card-radius: 0.75rem;
+  --surface-card: var(--color-gray-900);
+  --surface-raised: var(--color-gray-800);
+  --border-subtle: var(--color-gray-800);
+  --text-muted: var(--color-gray-400);
 }
 
 /* ─── Base ───────────────────────────────────────────────────────────────── */
 *, *::before, *::after { box-sizing: border-box; }
 
-html { height: 100%; }
+html {
+  height: 100%;
+  scroll-padding-top: calc(var(--mobile-header-height) + env(safe-area-inset-top));
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
 
 body {
-  height: 100%;
+  min-height: 100%;
   margin: 0;
   background: var(--color-gray-950);
   color: var(--color-gray-50);
@@ -71,6 +87,124 @@ body {
   font-size: 14px;
   line-height: 1.5;
   -webkit-font-smoothing: antialiased;
+}
+
+button, input, select, textarea { font: inherit; }
+img, svg { max-width: 100%; }
+
+/* Raise legacy muted utilities to the AA-safe muted token without duplicating page markup. */
+.text-\[\#667085\], .text-\[\#475467\] { color: var(--text-muted) !important; }
+:where(input, select, textarea) { border-color: var(--color-gray-500); }
+::placeholder { color: var(--color-gray-400); opacity: 1; }
+
+:where(a, button, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--color-brand-300);
+  outline-offset: 2px;
+}
+
+.tf-app-shell { display: flex; min-height: 100vh; min-height: 100dvh; }
+.tf-content-shell { display: flex; min-width: 0; flex: 1; flex-direction: column; }
+.tf-desktop-sidebar { display: none; }
+.tf-page-header { padding: 1rem 1rem 0; padding-right: max(1rem, env(safe-area-inset-right)); padding-left: max(1rem, env(safe-area-inset-left)); }
+.tf-desktop-page-title { display: none; }
+.tf-page-actions { display: flex; flex-wrap: wrap; gap: 0.625rem; }
+.tf-page-actions > button { flex: 1 1 100%; }
+
+.tf-main-content {
+  min-width: 0;
+  flex: 1;
+  padding: var(--space-page-mobile);
+  padding-right: max(var(--space-page-mobile), env(safe-area-inset-right));
+  padding-bottom: max(var(--space-page-mobile), env(safe-area-inset-bottom));
+  padding-left: max(var(--space-page-mobile), env(safe-area-inset-left));
+  outline: none;
+}
+
+.tf-mobile-header {
+  position: sticky;
+  top: 0;
+  z-index: 30;
+  border-bottom: 1px solid var(--border-subtle);
+  background: color-mix(in srgb, var(--color-gray-950) 92%, transparent);
+  padding-top: env(safe-area-inset-top);
+  backdrop-filter: blur(12px);
+}
+
+.tf-mobile-header-row {
+  display: flex;
+  min-height: var(--mobile-header-height);
+  align-items: center;
+  gap: 0.625rem;
+  padding-inline: max(0.75rem, env(safe-area-inset-left));
+}
+
+.tf-mobile-wordmark { width: 7.25rem; height: auto; flex: none; }
+.tf-mobile-title { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: 0.875rem; font-weight: 600; color: var(--color-gray-200); }
+.tf-card-header { flex-wrap: wrap; }
+.tf-icon-button { display: inline-flex; min-width: var(--control-min-size); min-height: var(--control-min-size); align-items: center; justify-content: center; border-radius: 0.625rem; color: var(--color-gray-300); transition: background-color 150ms ease, color 150ms ease; }
+.tf-icon-button:hover { background: var(--color-gray-800); color: var(--color-gray-50); }
+.tf-icon-button svg { width: 1.5rem; height: 1.5rem; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.tf-skip-link { position: fixed; top: 0.5rem; left: 0.5rem; z-index: 80; transform: translateY(-200%); border-radius: 0.5rem; background: var(--color-brand-600); padding: 0.625rem 0.875rem; color: white; }
+.tf-skip-link:focus { transform: translateY(0); }
+
+.tf-mobile-drawer-root { position: fixed; inset: 0; z-index: 60; }
+.tf-drawer-backdrop { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; background: rgb(0 0 0 / 72%); }
+.tf-mobile-drawer {
+  position: absolute;
+  inset-block: 0;
+  right: 0;
+  display: flex;
+  width: min(90vw, 23rem);
+  flex-direction: column;
+  border-left: 1px solid var(--color-gray-700);
+  background: var(--color-gray-900);
+  box-shadow: -1.5rem 0 3rem rgb(0 0 0 / 35%);
+  padding-top: env(safe-area-inset-top);
+  padding-right: env(safe-area-inset-right);
+  padding-bottom: env(safe-area-inset-bottom);
+  animation: tf-drawer-in 180ms ease-out;
+}
+.tf-drawer-header { display: flex; min-height: var(--mobile-header-height); align-items: center; justify-content: space-between; gap: 1rem; border-bottom: 1px solid var(--border-subtle); padding-inline: 1rem; }
+.tf-drawer-nav { display: flex; flex: 1; flex-direction: column; gap: 0.25rem; overflow-y: auto; padding: 1rem 0.75rem; }
+.tf-drawer-footer { display: flex; flex-direction: column; gap: 0.5rem; border-top: 1px solid var(--border-subtle); padding: 1rem; }
+
+.tf-nav-link { display: flex; min-height: var(--control-min-size); align-items: center; gap: 0.75rem; border-radius: 0.625rem; padding: 0.625rem 0.75rem; text-align: left; font-size: 0.875rem; font-weight: 600; color: var(--color-gray-400); transition: background-color 150ms ease, color 150ms ease; }
+.tf-nav-link:hover { background: var(--color-gray-800); color: var(--color-gray-100); }
+.tf-nav-link-active { background: color-mix(in srgb, var(--color-brand-600) 20%, transparent); color: var(--color-brand-300); box-shadow: inset 3px 0 var(--color-brand-500); }
+.tf-nav-icon { display: inline-flex; width: 1.25rem; height: 1.25rem; flex: none; color: currentColor; }
+.tf-nav-icon svg { width: 100%; height: 100%; fill: none; stroke: currentColor; stroke-width: 1.8; stroke-linecap: round; stroke-linejoin: round; }
+.tf-nav-badge { display: inline-flex; min-width: 1.35rem; min-height: 1.35rem; align-items: center; justify-content: center; border: 1px solid var(--color-error-300); border-radius: 999px; background: var(--color-error-600); padding-inline: 0.3rem; font-size: 0.6875rem; font-weight: 700; line-height: 1; color: white; }
+
+.tf-mobile-action-bar { position: fixed; right: 0.75rem; bottom: max(0.75rem, env(safe-area-inset-bottom)); left: 0.75rem; z-index: 40; display: flex; align-items: center; gap: 0.5rem; border: 1px solid var(--color-gray-700); border-radius: 0.875rem; background: color-mix(in srgb, var(--color-gray-900) 96%, transparent); padding: 0.75rem; box-shadow: 0 1rem 2rem rgb(0 0 0 / 35%); backdrop-filter: blur(12px); }
+
+@keyframes tf-drawer-in { from { transform: translateX(100%); } to { transform: translateX(0); } }
+
+@media (max-width: 22rem) {
+  .tf-mobile-title { display: none; }
+  .tf-mobile-wordmark { width: 6.75rem; }
+}
+
+@media (max-width: 63.999rem) {
+  .tf-main-content :where(button:not([role='switch']), input:not([type='checkbox']):not([type='radio']), select, textarea) { min-height: var(--control-min-size); }
+  .tf-main-content :where(input:not([type='checkbox']):not([type='radio']), select, textarea) { font-size: 1rem; }
+  .tf-main-content :where(input, select, textarea) { max-width: 100%; }
+}
+
+@media (min-width: 64rem) {
+  html { scroll-padding-top: 4rem; }
+  .tf-desktop-sidebar { position: fixed; inset-block: 0; left: 0; z-index: 30; display: flex; width: var(--sidebar-w); flex-direction: column; border-right: 1px solid var(--border-subtle); background: var(--color-gray-900); }
+  .tf-content-shell { margin-left: var(--sidebar-w); }
+  .tf-mobile-header { display: none; }
+  .tf-page-header { position: sticky; top: 0; z-index: 20; display: flex; min-height: 4rem; align-items: center; justify-content: space-between; gap: 1rem; border-bottom: 1px solid var(--border-subtle); background: color-mix(in srgb, var(--color-gray-950) 90%, transparent); padding: 0 var(--space-page-desktop); backdrop-filter: blur(12px); }
+  .tf-desktop-page-title { display: block; font-size: 1rem; font-weight: 600; color: var(--color-gray-50); }
+  .tf-page-actions { align-items: center; gap: 0.5rem; }
+  .tf-page-actions > button { flex: none; }
+  .tf-main-content { padding: var(--space-page-desktop); }
+  .tf-mobile-action-bar { left: calc(var(--sidebar-w) + 1.5rem); right: 1.5rem; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { scroll-behavior: auto !important; animation-duration: 0.01ms !important; animation-iteration-count: 1 !important; transition-duration: 0.01ms !important; }
 }
 
 /* ─── Scrollbars ─────────────────────────────────────────────────────────── */

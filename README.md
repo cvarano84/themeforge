@@ -16,11 +16,6 @@
   Automatically discover, download, organize, and maintain theme music for Plex, Jellyfin, Emby, and Kodi libraries.
 </p>
 
-<p align="center">
-  <a href="https://github.com/Themearr/themearr/releases">Releases</a> ·
-  <a href="https://github.com/Themearr/ProxmoxVE">Proxmox Scripts</a>
-</p>
-
 ---
 
 ## What it does
@@ -61,23 +56,13 @@ The official Compose setup runs the pinned `brainicism/bgutil-ytdlp-pot-provider
 
 ## Install
 
-### Proxmox LXC (one-line)
-
-Run this on your Proxmox host:
-
-```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/Themearr/ProxmoxVE/main/ct/themearr.sh)"
-```
-
-The installer generates an access token, prints it at the end, and saves a copy to `/root/themearr.creds`. Open `http://<container-ip>:8080`, enter the token, then pick your library source — sign in with Plex, or choose **"I don't use Plex"** to connect Radarr instead.
-
 ### Docker
 
 A multi-arch image (`amd64` / `arm64`) is published to GHCR on every release.
 
 ```bash
 # 1. Get the compose file
-curl -fsSL https://raw.githubusercontent.com/Themearr/themearr/main/docker-compose.yml -o docker-compose.yml
+curl -fsSL https://raw.githubusercontent.com/chrisflix-labs/themeforge/main/docker-compose.yml -o docker-compose.yml
 
 # 2. Generate the required access token
 echo "THEMEFORGE_AUTH_TOKEN=$(openssl rand -hex 32)" > .env
@@ -97,7 +82,7 @@ Open `http://127.0.0.1:8080` and enter the token from `.env`.
 
 ### Access token (required)
 
-The API refuses to start without `THEMEFORGE_AUTH_TOKEN` (or the deprecated `THEMEARR_AUTH_TOKEN` alias) — there is no unauthenticated mode. The Proxmox installer generates one for you; for Docker you set it yourself. Every client enters this token once.
+The API refuses to start without `THEMEFORGE_AUTH_TOKEN` (or the deprecated `THEMEARR_AUTH_TOKEN` alias) — there is no unauthenticated mode. T
 
 ### Downloader environment variables
 
@@ -122,7 +107,7 @@ environment:
   - YTDLP_DOWNLOAD_TIMEOUT_SECONDS=300
   - YTDLP_CONCURRENT_DOWNLOADS=1
   - YTDLP_PO_TOKEN_MODE=auto
-  - YTDLP_PO_TOKEN_PROVIDER_URL=http://themearr-pot-provider:4416
+  - YTDLP_PO_TOKEN_PROVIDER_URL=http://themeforge-pot-provider:4416
   # - YTDLP_COOKIES_FILE=/opt/themearr/config/youtube-cookies.txt
 volumes:
   - /path/to/your/movies:/movies
@@ -136,7 +121,7 @@ The recommended PO provider service is:
 services:
   themearr:
     depends_on:
-      - themearr-pot-provider
+      - themeforge-pot-provider
   themearr-pot-provider:
     image: brainicism/bgutil-ytdlp-pot-provider:1.3.1
     init: true
@@ -153,7 +138,7 @@ For a Plex host library at `/mnt/plex/Movies`, use this Docker mount:
 
 ```yaml
 services:
-  themearr:
+  themeforge:
     volumes:
       - /mnt/plex/Movies:/movies
 ```
@@ -311,7 +296,7 @@ Instead of waiting for the next sync, have Radarr tell ThemeForge directly. In R
 | Field | Value |
 |---|---|
 | Notification Triggers | **On Import** (also tick On Upgrade if you want) |
-| URL | `http://themearr:8080/api/webhook/radarr` |
+| URL | `http://themeforge:8080/api/webhook/radarr` |
 | Method | `POST` |
 | Headers | `X-Api-Key` = your key from Settings → API key |
 
@@ -333,7 +318,6 @@ Two caveats:
 
 - **In-app:** Settings → Updates. Downloads the latest release, preserves your data, and restarts.
 - **Docker:** `docker compose pull && docker compose up -d`
-- **Proxmox / bare metal:** the in-app updater, or re-run the community install script.
 
 > **Upgrading a pre-.NET-10 install:** releases from v1.39.10 onward need the **ASP.NET Core 10** runtime. Containers created earlier were provisioned with .NET 9, so install the runtime first:
 > ```bash
@@ -436,29 +420,3 @@ npm run lint                 # ESLint
 npx tsc --noEmit             # typecheck
 npm run build                # production build -> out/
 ```
-
-## Building a release
-
-Push to `main` — GitHub Actions will automatically:
-
-1. Detect the semver bump from commit messages (`feat:` → minor, `major:` → major, else patch)
-2. Build the frontend (Vite) and publish .NET for `linux-x64` and `linux-arm64`
-3. Bundle the frontend into each publish output
-4. Create a GitHub release with both tarballs **plus SHA-256 checksums** (verified by `install.sh` / `deploy.sh`)
-5. Build and push the multi-arch Docker image to `ghcr.io/themearr/themearr` (`:latest` and `:vX.Y.Z`)
-
-Changes that don't affect the shipped app (docs, `.gitignore`, workflows) don't cut a release.
-
-## Versioning
-
-Releases follow semantic versioning driven by commit message prefixes:
-
-| Prefix | Bump |
-|---|---|
-| `feat:` | minor |
-| `major:` / `BREAKING CHANGE` | major |
-| anything else | patch |
-
-## License
-
-MIT

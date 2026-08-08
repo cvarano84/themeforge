@@ -8,7 +8,8 @@ import { useResource } from '@/lib/useResource'
 
 export default function DashboardPage() {
   const [imgErrors, setImgErrors] = useState<Record<string, boolean>>({})
-  const { data: stats, error, retry } = useResource(useCallback(() => statsApi.get(), []))
+  const { data: stats, error, retry } = useResource(useCallback(() => statsApi.summary(), []))
+  const { data: activity, error: activityError, retry: retryActivity } = useResource(useCallback(() => statsApi.activity(), []))
 
   if (stats === null && error) {
     return <AppShell title="Dashboard"><EmptyState icon={<ErrorIcon />} title="Couldn't load the dashboard" description={error} action={<Button variant="secondary" onClick={retry}>Retry</Button>} /></AppShell>
@@ -47,11 +48,13 @@ export default function DashboardPage() {
               <h2 id="recent-downloads-heading" className="text-xs font-semibold uppercase tracking-wider text-[#98A2B3]">Recent downloads</h2>
               <Link to="/history" className="inline-flex min-h-11 items-center rounded-lg px-3 text-sm font-semibold text-[#F4AAAA] transition-colors hover:bg-[#1D2939] hover:text-white">View all <span aria-hidden="true" className="ml-1">→</span></Link>
             </div>
-            {stats.recentActivity.length === 0 ? (
+            {!activity ? (
+              <div className="flex min-h-32 items-center justify-center">{activityError ? <p className="text-sm text-[#98A2B3]">Activity unavailable.</p> : <Spinner size={20} className="text-[#BB0000]" />}</div>
+            ) : activity.recentActivity.length === 0 ? (
               <div className="flex min-h-32 items-center justify-center px-4 py-8 text-center"><p className="text-sm text-[#98A2B3]">No themes downloaded yet.</p></div>
             ) : (
               <div className="divide-y divide-[#1D2939]">
-                {stats.recentActivity.map(entry => (
+                {activity.recentActivity.map(entry => (
                   <div key={entry.id} className="flex min-h-16 items-start gap-3 px-4 py-3">
                     <div className="mt-0.5 flex h-9 w-9 flex-shrink-0 items-center justify-center rounded-full bg-[#12B76A]/15" aria-label="Downloaded successfully" role="img">
                       <svg width="14" height="14" viewBox="0 0 12 12" fill="none" stroke="#6CE9A6" strokeWidth="2.5" strokeLinecap="round" aria-hidden="true"><path d="M2 6l3 3 5-5" /></svg>
@@ -72,11 +75,13 @@ export default function DashboardPage() {
               <h2 id="recently-added-heading" className="text-xs font-semibold uppercase tracking-wider text-[#98A2B3]">Recently added</h2>
               <Link to="/queue" className="inline-flex min-h-11 items-center rounded-lg px-3 text-sm font-semibold text-[#F4AAAA] transition-colors hover:bg-[#1D2939] hover:text-white">Go to queue <span aria-hidden="true" className="ml-1">→</span></Link>
             </div>
-            {stats.recentlyAdded.length === 0 ? (
+            {!activity ? (
+              <div className="flex min-h-32 items-center justify-center">{activityError ? <p className="text-sm text-[#98A2B3]">Recently added unavailable.</p> : <Spinner size={20} className="text-[#BB0000]" />}</div>
+            ) : activity.recentlyAdded.length === 0 ? (
               <div className="flex min-h-32 items-center justify-center px-4 py-8 text-center"><p className="text-sm text-[#98A2B3]">{stats.pending === 0 ? 'All movies have themes!' : 'Sync your library to populate.'}</p></div>
             ) : (
               <div className="divide-y divide-[#1D2939]">
-                {stats.recentlyAdded.map(movie => (
+                {activity.recentlyAdded.map(movie => (
                   <div key={movie.id} className="flex min-h-16 items-center gap-3 px-4 py-2.5">
                     <div className="relative h-12 w-8 flex-shrink-0 overflow-hidden rounded bg-[#1D2939]">
                       {movie.posterUrl && !imgErrors[movie.id] ? <img src={movie.posterUrl} alt="" className="absolute inset-0 h-full w-full object-cover" onError={() => setImgErrors(e => ({ ...e, [movie.id]: true }))} loading="lazy" /> : <div className="flex h-full w-full items-center justify-center"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#667085" strokeWidth="1.5" aria-hidden="true"><rect x="2" y="2" width="20" height="20" rx="2" /><path d="M7 2v20M17 2v20M2 12h20" /></svg></div>}
@@ -92,6 +97,7 @@ export default function DashboardPage() {
             )}
           </section>
         </div>
+        {activityError && <div className="flex items-center justify-between gap-3 rounded-lg border border-[#B42318]/40 bg-[#FEF3F2]/5 px-4 py-3"><p className="text-sm text-[#FDA29B]">Recent dashboard activity could not be loaded.</p><Button variant="secondary" size="sm" onClick={retryActivity}>Retry</Button></div>}
       </div>
     </AppShell>
   )

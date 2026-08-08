@@ -14,23 +14,7 @@ public class StatsController(Database db, PosterUrlSigner posterSigner, LibraryS
     public IActionResult GetStats()
     {
         var stats     = db.GetStats();
-        var posterExpiry = DateTimeOffset.UtcNow.AddHours(12);
-        var activeSource = sources.Active.Name;
-
-        // Attach signed, token-free poster URLs (same as MoviesController).
-        foreach (var movie in stats.RecentlyAdded)
-        {
-            var id = movie.GetValueOrDefault("id")?.ToString() ?? "";
-
-            // source_ref is opaque outside its own source (see PosterController); only a
-            // movie whose source matches the active one has a poster to sign a URL for.
-            var hasPoster = movie.GetValueOrDefault("source")?.ToString() == activeSource
-                         && !string.IsNullOrEmpty(movie.GetValueOrDefault("sourceRef")?.ToString());
-
-            movie["posterUrl"] = (!string.IsNullOrEmpty(id) && hasPoster)
-                ? posterSigner.PosterPath(id, posterExpiry)
-                : null;
-        }
+        AttachPosterUrls(stats.RecentlyAdded);
 
         return Ok(new
         {
@@ -43,6 +27,38 @@ public class StatsController(Database db, PosterUrlSigner posterSigner, LibraryS
             recentActivity = stats.RecentActivity,
             recentlyAdded  = stats.RecentlyAdded,
         });
+    }
+
+    [HttpGet("summary")]
+    public IActionResult GetSummary() => Ok(db.GetDashboardSummary());
+
+    [HttpGet("activity")]
+    public IActionResult GetActivity()
+    {
+        var activity = db.GetDashboardActivity();
+        AttachPosterUrls(activity.RecentlyAdded);
+        return Ok(activity);
+    }
+
+    private void AttachPosterUrls(IEnumerable<Dictionary<string, object?>> movies)
+    {
+        var posterExpiry = DateTimeOffset.UtcNow.AddHours(12);
+        var activeSource = sources.Active.Name;
+
+        // Attach signed, token-free poster URLs (same as MoviesController).
+        foreach (var movie in movies)
+        {
+            var id = movie.GetValueOrDefault("id")?.ToString() ?? "";
+
+            // source_ref is opaque outside its own source (see PosterController); only a
+            // movie whose source matches the active one has a poster to sign a URL for.
+            var hasPoster = movie.GetValueOrDefault("source")?.ToString() == activeSource
+                         && !string.IsNullOrEmpty(movie.GetValueOrDefault("sourceRef")?.ToString());
+
+            movie["posterUrl"] = (!string.IsNullOrEmpty(id) && hasPoster)
+                ? posterSigner.PosterPath(id, posterExpiry)
+                : null;
+        }
     }
 
     // Shows are counted separately from movies: the two libraries have different

@@ -26,7 +26,7 @@ public class DatabaseReadTests
     }
 
     [Fact]
-    public void GetAllMovies_and_GetStats_reflectDiskStatus()
+    public void Reconciliation_persists_disk_status_for_fast_stats_reads()
     {
         using var downloadedDir = new TempDir();
         downloadedDir.Write("theme.mp3", new byte[] { 1, 2, 3 });
@@ -44,6 +44,11 @@ public class DatabaseReadTests
         Assert.Contains(all, m => m["title"]?.ToString() == "Downloaded Movie" && m["status"]?.ToString() == "downloaded");
         Assert.Contains(all, m => m["title"]?.ToString() == "Pending Movie"    && m["status"]?.ToString() == "pending");
 
+        // Normal page reads no longer walk the filesystem. The background sync owns
+        // this reconciliation pass and Dashboard consumes the resulting local state.
+        var reconciliation = new ThemeReconciliationService(db,
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<ThemeReconciliationService>.Instance);
+        reconciliation.RefreshStoredMovieStatuses();
         var stats = db.GetStats();
         Assert.Equal(2, stats.Total);
         Assert.Equal(1, stats.Downloaded);

@@ -28,6 +28,10 @@ export function useResource<T>(fetcher: () => Promise<T>) {
 
   // Identifies the newest request, so a slow earlier one cannot overwrite it.
   const latest = useRef(0)
+  // React StrictMode intentionally replays mount effects in development. Remember the
+  // attempt already issued so that replay does not duplicate a real API request; an
+  // explicit retry increments attempt and still performs exactly one new request.
+  const startedAttempt = useRef<number | null>(null)
   const fetcherRef = useRef(fetcher)
   // Refs are only ever written outside of render (React disallows mutating
   // them during render), so keep this synced via an effect that runs after
@@ -37,6 +41,8 @@ export function useResource<T>(fetcher: () => Promise<T>) {
   })
 
   useEffect(() => {
+    if (startedAttempt.current === attempt) return
+    startedAttempt.current = attempt
     const mine = ++latest.current
     fetcherRef.current()
       .then(value => {

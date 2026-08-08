@@ -9,7 +9,7 @@ public class Database(string dbPath)
     private SqliteConnection Open()
     {
         Directory.CreateDirectory(Path.GetDirectoryName(dbPath)!);
-        var conn = new SqliteConnection($"Data Source={dbPath}");
+        var conn = new SqliteConnection($"Data Source={dbPath};Default Timeout=5;Pooling=True");
         conn.Open();
         return conn;
     }
@@ -17,6 +17,12 @@ public class Database(string dbPath)
     public void Init()
     {
         using var conn = Open();
+        // WAL keeps read-only UI requests on the latest committed snapshot while a
+        // background sync is writing its next transaction. Without it, a large upsert
+        // can serialize navigation behind the writer even though pages do no sync work.
+        conn.Execute("PRAGMA journal_mode=WAL");
+        conn.Execute("PRAGMA synchronous=NORMAL");
+        conn.Execute("PRAGMA busy_timeout=5000");
         conn.Execute("""
             CREATE TABLE IF NOT EXISTS movies (
                 id          TEXT PRIMARY KEY,
@@ -94,6 +100,7 @@ public class Database(string dbPath)
         MigrateMoviesTableV4(conn);
         MigrateShowsTableV2(conn);
         MigrateArrMediaColumns(conn);
+        MigrateReadPerformanceSchema(conn);
         MigrateLegacyArrInstances(conn);
         MigrateLibrarySourceSettings(conn);
         PruneDeadSettings(conn);
@@ -123,6 +130,59 @@ public class Database(string dbPath)
             foreach (var (name, type) in additions)
                 if (!columns.Contains(name)) conn.Execute($"ALTER TABLE {table} ADD COLUMN {name} {type}");
         }
+    }
+
+    /// <summary>
+    /// Materializes the logical movie identity used by multi-Radarr grouping and adds
+    /// indexes for the read paths exercised by Dashboard, Movies, and Queue. This runs
+    /// once at startup for legacy rows; normal syncs maintain group_key on write.
+    /// </summary>
+    private static void MigrateReadPerformanceSchema(SqliteConnection conn)
+    {
+        var columns = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        conn.Query("PRAGMA table_info(movies)", r =>
+        {
+            while (r.Read()) columns.Add(r.GetString(1));
+        });
+        if (!columns.Contains("group_key"))
+            conn.Execute("ALTER TABLE movies ADD COLUMN group_key TEXT");
+
+        var missing = new List<(string Id, string GroupKey)>();
+        conn.Query("""
+            SELECT id, source, title, year, tmdb_id, imdb_id
+            FROM movies
+            WHERE group_key IS NULL OR group_key = ''
+            """, r =>
+        {
+            while (r.Read())
+            {
+                var row = new Dictionary<string, object?>
+                {
+                    ["id"] = r.GetString(0),
+                    ["source"] = r.GetString(1),
+                    ["title"] = r.GetString(2),
+                    ["year"] = r.IsDBNull(3) ? null : r.GetInt32(3),
+                    ["tmdbId"] = r.IsDBNull(4) ? null : r.GetString(4),
+                    ["imdbId"] = r.IsDBNull(5) ? null : r.GetString(5),
+                };
+                missing.Add((r.GetString(0), MediaGrouping.GroupKey(row, shows: false)));
+            }
+        });
+        using (var tx = conn.BeginTransaction())
+        {
+            foreach (var row in missing)
+                conn.Execute("UPDATE movies SET group_key = @key WHERE id = @id",
+                    ("@key", row.GroupKey), ("@id", row.Id));
+            tx.Commit();
+        }
+
+        conn.Execute("CREATE INDEX IF NOT EXISTS ix_movies_group_key ON movies(group_key)");
+        conn.Execute("CREATE INDEX IF NOT EXISTS ix_movies_title ON movies(title COLLATE NOCASE)");
+        conn.Execute("CREATE INDEX IF NOT EXISTS ix_movies_status_title ON movies(status, ignored, title COLLATE NOCASE)");
+        conn.Execute("CREATE INDEX IF NOT EXISTS ix_movies_instance_status ON movies(instance_id, status)");
+        conn.Execute("CREATE INDEX IF NOT EXISTS ix_movies_source_ref ON movies(source, source_ref)");
+        conn.Execute("CREATE INDEX IF NOT EXISTS ix_movies_synced_at ON movies(synced_at DESC)");
+        conn.Execute("CREATE INDEX IF NOT EXISTS ix_history_media_downloaded ON theme_history(media_type, downloaded_at DESC)");
     }
 
     /// <summary>
@@ -781,6 +841,15 @@ public class Database(string dbPath)
         {
             if (string.IsNullOrEmpty(m.Folder)) continue;
             var id = MediaFolderId.For(m.Folder);
+            var groupKey = MediaGrouping.GroupKey(new Dictionary<string, object?>
+            {
+                ["id"] = id,
+                ["source"] = m.Source,
+                ["title"] = m.Title,
+                ["year"] = m.Year,
+                ["tmdbId"] = m.TmdbId,
+                ["imdbId"] = m.ImdbId,
+            }, shows: false);
 
             string? oldId = null;
             long oldIgnored = 0;
@@ -804,11 +873,11 @@ public class Database(string dbPath)
                 relocated++;
             }
             conn.Execute("""
-                INSERT INTO movies (id, folderName, source, source_ref, title, year, sourcePath, status, ignored, synced_at,
+                INSERT INTO movies (id, folderName, source, source_ref, title, year, sourcePath, status, ignored, synced_at, group_key,
                                     instance_id, remote_item_id, quality_label, tmdb_id, imdb_id)
                 VALUES (@id, @f, @src, @ref, @t, @y, @sp, @status, @ignored,
                         COALESCE(@synced, (SELECT synced_at FROM movies WHERE id = @id), strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
-                        @instance, @remote, @quality, @tmdb, @imdb)
+                        @groupKey, @instance, @remote, @quality, @tmdb, @imdb)
                 ON CONFLICT(id) DO UPDATE SET
                     folderName = excluded.folderName,
                     source     = excluded.source,
@@ -821,12 +890,26 @@ public class Database(string dbPath)
                     quality_label = excluded.quality_label,
                     tmdb_id = excluded.tmdb_id,
                     imdb_id = excluded.imdb_id,
+                    group_key = excluded.group_key,
                     synced_at  = COALESCE(movies.synced_at, excluded.synced_at)
+                WHERE movies.folderName IS NOT excluded.folderName
+                   OR movies.source IS NOT excluded.source
+                   OR movies.source_ref IS NOT excluded.source_ref
+                   OR movies.title IS NOT excluded.title
+                   OR movies.year IS NOT excluded.year
+                   OR movies.sourcePath IS NOT excluded.sourcePath
+                   OR movies.instance_id IS NOT excluded.instance_id
+                   OR movies.remote_item_id IS NOT excluded.remote_item_id
+                   OR movies.quality_label IS NOT excluded.quality_label
+                   OR movies.tmdb_id IS NOT excluded.tmdb_id
+                   OR movies.imdb_id IS NOT excluded.imdb_id
+                   OR movies.group_key IS NOT excluded.group_key
                 """,
                 ("@id", id), ("@f", m.Folder), ("@src", m.Source), ("@ref", m.SourceRef),
                 ("@t", m.Title), ("@y", (object?)m.Year ?? DBNull.Value), ("@sp", m.SourcePath),
                 ("@status", oldStatus), ("@ignored", oldIgnored),
                 ("@synced", (object?)oldSyncedAt ?? DBNull.Value),
+                ("@groupKey", groupKey),
                 ("@instance", (object?)m.InstanceId ?? DBNull.Value),
                 ("@remote", (object?)m.RemoteItemId ?? DBNull.Value),
                 ("@quality", (object?)m.QualityLabel ?? DBNull.Value),
@@ -899,6 +982,207 @@ public class Database(string dbPath)
         return result;
     }
 
+    /// <summary>
+    /// Returns one page of logical movies entirely from synchronized SQLite state.
+    /// Filesystem verification belongs to sync/reconciliation, never this read path.
+    /// The grouping CTE returns only group keys; full rows are materialized for the
+    /// requested page, so memory and JSON costs scale with page size rather than library
+    /// size even when a movie has copies in several Radarr instances.
+    /// </summary>
+    public MoviePageResult GetMoviePage(
+        int page = 1,
+        int pageSize = 50,
+        string? search = null,
+        string? status = null,
+        string? instanceId = null,
+        string? quality = null,
+        string? sort = null,
+        string? direction = null,
+        IReadOnlyCollection<string>? excludeIds = null)
+    {
+        page = Math.Max(1, page);
+        pageSize = Math.Clamp(pageSize, 1, 100);
+        search = (search ?? "").Trim();
+        status = NormalizeMovieStatusFilter(status);
+        instanceId = (instanceId ?? "").Trim();
+        quality = (quality ?? "").Trim();
+        var excluded = (excludeIds ?? Array.Empty<string>()).Where(id => !string.IsNullOrWhiteSpace(id))
+            .Distinct(StringComparer.Ordinal).Take(100).ToList();
+        var excludeSql = excluded.Count == 0 ? "1 = 1" :
+            $"m.group_key NOT IN (SELECT group_key FROM movies excluded WHERE excluded.id IN ({string.Join(",", excluded.Select((_, index) => $"@exclude{index}"))}))";
+        var descending = string.Equals(direction, "desc", StringComparison.OrdinalIgnoreCase);
+        var orderColumn = (sort ?? "title").ToLowerInvariant() switch
+        {
+            "year" => "year_sort",
+            "status" => "aggregate_status",
+            "syncedat" or "updatedat" => "synced_sort",
+            _ => "title_sort COLLATE NOCASE",
+        };
+        var orderDirection = descending ? "DESC" : "ASC";
+
+        using var conn = Open();
+        var filterSql = """
+            (@search = '' OR EXISTS (
+                SELECT 1 FROM movies searched
+                WHERE searched.group_key = m.group_key
+                  AND (searched.title LIKE @searchLike ESCAPE '\'
+                       OR CAST(searched.year AS TEXT) LIKE @searchLike ESCAPE '\')
+            ))
+            AND (@instance = '' OR EXISTS (
+                SELECT 1 FROM movies matched_instance
+                WHERE matched_instance.group_key = m.group_key
+                  AND matched_instance.instance_id = @instance
+            ))
+            AND (@quality = '' OR EXISTS (
+                SELECT 1 FROM movies matched_quality
+                WHERE matched_quality.group_key = m.group_key
+                  AND matched_quality.quality_label = @quality
+            ))
+            """;
+        var cte = $"""
+            WITH grouped AS (
+                SELECT m.group_key,
+                       MIN(m.title) AS title_sort,
+                       MIN(m.year) AS year_sort,
+                       MAX(m.synced_at) AS synced_sort,
+                       COUNT(*) AS location_count,
+                       SUM(CASE WHEN m.ignored = 1 THEN 1 ELSE 0 END) AS ignored_count,
+                       SUM(CASE WHEN m.ignored = 0 AND m.status <> 'unresolved' THEN 1 ELSE 0 END) AS available_count,
+                       SUM(CASE WHEN m.ignored = 0 AND m.status = 'downloaded' THEN 1 ELSE 0 END) AS downloaded_count
+                FROM movies m
+                WHERE m.group_key IS NOT NULL AND m.group_key <> '' AND {excludeSql} AND {filterSql}
+                GROUP BY m.group_key
+            ), classified AS (
+                SELECT *, CASE
+                    WHEN ignored_count = location_count THEN 'ignored'
+                    WHEN available_count = 0 THEN 'unavailable'
+                    WHEN downloaded_count = 0 THEN 'missing'
+                    WHEN downloaded_count = available_count THEN 'downloaded'
+                    ELSE 'partial'
+                END AS aggregate_status
+                FROM grouped
+            )
+            """;
+
+        static string EscapeLike(string value) => value
+            .Replace("\\", "\\\\", StringComparison.Ordinal)
+            .Replace("%", "\\%", StringComparison.Ordinal)
+            .Replace("_", "\\_", StringComparison.Ordinal);
+        var common = new List<(string name, object? value)>
+        {
+            ("@search", search), ("@searchLike", $"%{EscapeLike(search)}%"),
+            ("@instance", instanceId), ("@quality", quality), ("@status", status),
+        };
+        common.AddRange(excluded.Select((id, index) => ($"@exclude{index}", (object?)id)));
+
+        var counts = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+        conn.Query(cte + " SELECT aggregate_status, COUNT(*) FROM classified GROUP BY aggregate_status", r =>
+        {
+            while (r.Read()) counts[r.GetString(0)] = (int)r.GetInt64(1);
+        }, common.ToArray());
+
+        var total = status switch
+        {
+            "all" => counts.Where(pair => pair.Key != "ignored").Sum(pair => pair.Value),
+            "outstanding" => counts.GetValueOrDefault("missing") + counts.GetValueOrDefault("partial"),
+            _ => counts.GetValueOrDefault(status),
+        };
+        var totalPages = total == 0 ? 0 : (int)Math.Ceiling(total / (double)pageSize);
+        if (totalPages > 0) page = Math.Min(page, totalPages);
+        var offset = (page - 1) * pageSize;
+        var keys = new List<string>();
+        var statusWhere = status switch
+        {
+            "all" => "aggregate_status <> 'ignored'",
+            "outstanding" => "aggregate_status IN ('missing', 'partial')",
+            _ => "aggregate_status = @status",
+        };
+        conn.Query(cte + $" SELECT group_key FROM classified WHERE {statusWhere} ORDER BY {orderColumn} {orderDirection}, group_key ASC LIMIT @limit OFFSET @offset",
+            r => { while (r.Read()) keys.Add(r.GetString(0)); },
+            common.Concat(new[] { ("@limit", (object?)pageSize), ("@offset", (object?)offset) }).ToArray());
+
+        var items = new List<Dictionary<string, object?>>();
+        var arrInstances = GetArrInstances("radarr");
+        if (keys.Count > 0)
+        {
+            var placeholders = string.Join(",", keys.Select((_, index) => $"@g{index}"));
+            var rows = new List<Dictionary<string, object?>>();
+            conn.Query($"""
+                SELECT id, folderName, source, source_ref, title, year, sourcePath,
+                       status, ignored, instance_id, remote_item_id, quality_label,
+                       tmdb_id, imdb_id, group_key
+                FROM movies WHERE group_key IN ({placeholders})
+                """, r =>
+            {
+                while (r.Read()) rows.Add(ReadStoredMovieRow(r));
+            }, keys.Select((key, index) => ($"@g{index}", (object?)key)).ToArray());
+
+            var grouped = MediaGrouping.Group(rows, arrInstances, shows: false)
+                .ToDictionary(row => row["groupKey"]?.ToString() ?? "", StringComparer.Ordinal);
+            items.AddRange(keys.Where(grouped.ContainsKey).Select(key => grouped[key]));
+        }
+
+        var facets = GetMovieFacets(conn, arrInstances);
+        return new MoviePageResult(items, page, pageSize, total, totalPages, counts,
+            facets.Qualities, facets.Instances, GetLatestMovieSync(conn));
+    }
+
+    private static string NormalizeMovieStatusFilter(string? value) => (value ?? "all").ToLowerInvariant() switch
+    {
+        "pending" or "missing" => "missing",
+        "downloaded" => "downloaded",
+        "partial" => "partial",
+        "ignored" => "ignored",
+        "unresolved" or "unavailable" => "unavailable",
+        "outstanding" => "outstanding",
+        _ => "all",
+    };
+
+    private static Dictionary<string, object?> ReadStoredMovieRow(SqliteDataReader r)
+    {
+        var ignored = r.GetInt64(8) != 0;
+        return new Dictionary<string, object?>
+        {
+            ["id"] = r.GetString(0),
+            ["folderName"] = r.IsDBNull(1) ? "" : r.GetString(1),
+            ["source"] = r.GetString(2),
+            ["sourceRef"] = r.IsDBNull(3) ? null : r.GetString(3),
+            ["title"] = r.GetString(4),
+            ["year"] = r.IsDBNull(5) ? null : r.GetInt32(5),
+            ["sourcePath"] = r.IsDBNull(6) ? null : r.GetString(6),
+            ["status"] = ignored ? "ignored" : r.GetString(7),
+            ["ignored"] = ignored,
+            ["instanceId"] = r.IsDBNull(9) ? null : r.GetString(9),
+            ["remoteItemId"] = r.IsDBNull(10) ? null : r.GetString(10),
+            ["qualityLabel"] = r.IsDBNull(11) ? null : r.GetString(11),
+            ["tmdbId"] = r.IsDBNull(12) ? null : r.GetString(12),
+            ["imdbId"] = r.IsDBNull(13) ? null : r.GetString(13),
+            ["groupKey"] = r.IsDBNull(14) ? null : r.GetString(14),
+        };
+    }
+
+    private static (List<string> Qualities, List<MovieInstanceFacet> Instances) GetMovieFacets(
+        SqliteConnection conn, IEnumerable<ArrInstance> arrInstances)
+    {
+        var qualities = new List<string>();
+        conn.Query("SELECT DISTINCT quality_label FROM movies WHERE quality_label IS NOT NULL AND quality_label <> '' ORDER BY quality_label COLLATE NOCASE",
+            r => { while (r.Read()) qualities.Add(r.GetString(0)); });
+        var instances = arrInstances
+            .OrderBy(instance => instance.Priority).ThenBy(instance => instance.Name)
+            .Select(instance => new MovieInstanceFacet(instance.Id, instance.Name)).ToList();
+        return (qualities, instances);
+    }
+
+    private static string? GetLatestMovieSync(SqliteConnection conn)
+    {
+        string? value = null;
+        conn.Query("SELECT MAX(synced_at) FROM movies", r =>
+        {
+            if (r.Read() && !r.IsDBNull(0)) value = r.GetString(0);
+        });
+        return value;
+    }
+
     public Dictionary<string, object?>? GetMovie(string id)
     {
         using var conn = Open();
@@ -910,8 +1194,27 @@ public class Database(string dbPath)
     }
 
     public List<Dictionary<string, object?>> GetStoredMovies() => GetStoredMedia(includePlexTheme: false);
-    public Dictionary<string, object?>? GetStoredMovie(string id) =>
-        GetStoredMovies().FirstOrDefault(row => row["id"]?.ToString() == id);
+    public Dictionary<string, object?>? GetStoredMovie(string id)
+    {
+        using var conn = Open();
+        Dictionary<string, object?>? result = null;
+        conn.Query("""
+            SELECT id, folderName, source, source_ref, title, year, sourcePath,
+                   status, ignored, instance_id, remote_item_id, quality_label,
+                   tmdb_id, imdb_id, group_key
+            FROM movies WHERE id = @id
+            """, r => { if (r.Read()) result = ReadStoredMovieRow(r); }, ("@id", id));
+        return result;
+    }
+
+    public int GetStoredPendingMovieCount()
+    {
+        using var conn = Open();
+        var count = 0;
+        conn.Query("SELECT COUNT(*) FROM movies WHERE status = 'pending' AND ignored = 0",
+            r => { if (r.Read()) count = (int)r.GetInt64(0); });
+        return count;
+    }
 
     public void RemoveMovie(string id)
     {
@@ -954,6 +1257,15 @@ public class Database(string dbPath)
     {
         using var conn = Open();
         conn.Execute("UPDATE movies SET status = @s WHERE id = @id", ("@s", status), ("@id", id));
+    }
+
+    public void SetMovieStatuses(IEnumerable<(string Id, string Status)> statuses)
+    {
+        using var conn = Open();
+        using var tx = conn.BeginTransaction();
+        foreach (var (id, status) in statuses)
+            conn.Execute("UPDATE movies SET status = @s WHERE id = @id", ("@s", status), ("@id", id));
+        tx.Commit();
     }
 
     public void SetMovieIgnored(string id, bool ignored)
@@ -1136,20 +1448,26 @@ public class Database(string dbPath)
     public StatsResult GetStats()
     {
         using var conn = Open();
-
-        // Movie counts: use filesystem-verified status (same logic as the movies page)
-        // so that the dashboard numbers always match what's shown there.
-        var allMovies = GetAllMovies();
-        int downloaded = allMovies.Count(m => m["status"]?.ToString() == "downloaded");
-        int pending = allMovies.Count(m => m["status"]?.ToString() == "pending");
-        int ignored = allMovies.Count(m => m["status"]?.ToString() == "ignored");
-
-        // Total = entire Plex library (all rows, including ignored and movies whose
-        // folders aren't yet mapped), so coverage reflects the full library, not just
-        // the subset the app has processed.
         var total = 0;
-        conn.Query("SELECT COUNT(*) FROM movies",
-            r => { if (r.Read()) total = (int)r.GetInt64(0); });
+        var downloaded = 0;
+        var pending = 0;
+        var ignored = 0;
+        // One aggregate query over synchronized state replaces loading every ORM-like
+        // dictionary and stat-ing every movie folder/theme file on each dashboard view.
+        conn.Query("""
+            SELECT COUNT(*),
+                   COALESCE(SUM(CASE WHEN ignored = 0 AND status = 'downloaded' THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN ignored = 0 AND status = 'pending' THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN ignored = 1 THEN 1 ELSE 0 END), 0)
+            FROM movies
+            """, r =>
+        {
+            if (!r.Read()) return;
+            total = (int)r.GetInt64(0);
+            downloaded = (int)r.GetInt64(1);
+            pending = (int)r.GetInt64(2);
+            ignored = (int)r.GetInt64(3);
+        });
 
         var coverage = total > 0 ? Math.Round(downloaded * 100.0 / total, 1) : 0.0;
 
@@ -1181,26 +1499,17 @@ public class Database(string dbPath)
                     });
             });
 
-        // Last 5 recently-synced movies that are still pending (filesystem-verified).
-        // Pull extra candidates from DB ordered by syncedAt, then cross-reference with
-        // allMovies so only movies whose folders+files confirm 'pending' status are shown.
-        var pendingIds = allMovies
-            .Where(m => m["status"]?.ToString() == "pending")
-            .Select(m => m["id"]?.ToString())
-            .ToHashSet();
-
         var recentlyAdded = new List<Dictionary<string, object?>>();
         conn.Query("""
             SELECT id, source, source_ref, title, year, synced_at
             FROM movies
             WHERE ignored = 0 AND status = 'pending' AND synced_at IS NOT NULL
-            ORDER BY synced_at DESC LIMIT 20
+            ORDER BY synced_at DESC LIMIT 5
             """, r =>
         {
-            while (r.Read() && recentlyAdded.Count < 5)
+            while (r.Read())
             {
                 var id = r.GetString(0);
-                if (!pendingIds.Contains(id)) continue;
                 recentlyAdded.Add(new Dictionary<string, object?>
                 {
                     ["id"] = id,
@@ -1214,6 +1523,70 @@ public class Database(string dbPath)
         });
 
         return new StatsResult(total, downloaded, pending, ignored, coverage, addedThisWeek, recentActivity, recentlyAdded);
+    }
+
+    public DashboardSummaryResult GetDashboardSummary()
+    {
+        using var conn = Open();
+        var total = 0;
+        var downloaded = 0;
+        var pending = 0;
+        var ignored = 0;
+        conn.Query("""
+            SELECT COUNT(*),
+                   COALESCE(SUM(CASE WHEN ignored = 0 AND status = 'downloaded' THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN ignored = 0 AND status = 'pending' THEN 1 ELSE 0 END), 0),
+                   COALESCE(SUM(CASE WHEN ignored = 1 THEN 1 ELSE 0 END), 0)
+            FROM movies
+            """, r =>
+        {
+            if (!r.Read()) return;
+            total = (int)r.GetInt64(0);
+            downloaded = (int)r.GetInt64(1);
+            pending = (int)r.GetInt64(2);
+            ignored = (int)r.GetInt64(3);
+        });
+        var addedThisWeek = 0;
+        conn.Query("SELECT COUNT(*) FROM theme_history WHERE downloaded_at >= @w AND media_type = 'movie'",
+            r => { if (r.Read()) addedThisWeek = (int)r.GetInt64(0); },
+            ("@w", DateTime.UtcNow.AddDays(-7).ToString("o")));
+        var coverage = total > 0 ? Math.Round(downloaded * 100.0 / total, 1) : 0.0;
+        return new DashboardSummaryResult(total, downloaded, pending, ignored, coverage, addedThisWeek);
+    }
+
+    public DashboardActivityResult GetDashboardActivity()
+    {
+        using var conn = Open();
+        var recentActivity = new List<Dictionary<string, object?>>();
+        conn.Query(
+            "SELECT id, movie_id, movie_title, movie_year, theme_title, source_url, downloaded_at FROM theme_history WHERE media_type = 'movie' ORDER BY id DESC LIMIT 5",
+            r =>
+            {
+                while (r.Read())
+                    recentActivity.Add(new Dictionary<string, object?>
+                    {
+                        ["id"] = r.GetInt64(0), ["movieId"] = r.GetString(1),
+                        ["movieTitle"] = r.GetString(2), ["movieYear"] = r.IsDBNull(3) ? null : r.GetInt32(3),
+                        ["themeTitle"] = r.IsDBNull(4) ? null : r.GetString(4),
+                        ["sourceUrl"] = r.IsDBNull(5) ? null : r.GetString(5), ["downloadedAt"] = r.GetString(6),
+                    });
+            });
+        var recentlyAdded = new List<Dictionary<string, object?>>();
+        conn.Query("""
+            SELECT id, source, source_ref, title, year, synced_at
+            FROM movies
+            WHERE ignored = 0 AND status = 'pending' AND synced_at IS NOT NULL
+            ORDER BY synced_at DESC LIMIT 5
+            """, r =>
+        {
+            while (r.Read()) recentlyAdded.Add(new Dictionary<string, object?>
+            {
+                ["id"] = r.GetString(0), ["source"] = r.GetString(1),
+                ["sourceRef"] = r.IsDBNull(2) ? null : r.GetString(2), ["title"] = r.GetString(3),
+                ["year"] = r.IsDBNull(4) ? null : r.GetInt32(4), ["syncedAt"] = r.IsDBNull(5) ? null : r.GetString(5),
+            });
+        });
+        return new DashboardActivityResult(recentActivity, recentlyAdded);
     }
 
     /// <summary>
@@ -1475,6 +1848,26 @@ public record StatsResult(
     int AddedThisWeek,
     List<Dictionary<string, object?>> RecentActivity,
     List<Dictionary<string, object?>> RecentlyAdded);
+
+public sealed record DashboardSummaryResult(
+    int Total, int Downloaded, int Pending, int Ignored, double Coverage, int AddedThisWeek);
+
+public sealed record DashboardActivityResult(
+    List<Dictionary<string, object?>> RecentActivity,
+    List<Dictionary<string, object?>> RecentlyAdded);
+
+public sealed record MovieInstanceFacet(string Id, string Name);
+
+public sealed record MoviePageResult(
+    List<Dictionary<string, object?>> Items,
+    int Page,
+    int PageSize,
+    int Total,
+    int TotalPages,
+    IReadOnlyDictionary<string, int> StatusCounts,
+    IReadOnlyList<string> Qualities,
+    IReadOnlyList<MovieInstanceFacet> Instances,
+    string? LastSyncedAt);
 
 /// <summary>Internal Arr configuration. Controllers must project this record to a
 /// redacted response and must never serialize <see cref="ApiKey"/>.</summary>

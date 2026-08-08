@@ -28,7 +28,9 @@ public class PosterController(
         if (string.IsNullOrEmpty(id) || !signer.Verify(id, exp, sig, DateTimeOffset.UtcNow))
             return Unauthorized();
 
-        var movie = db.GetMovie(id);
+        // Poster requests are numerous on a grid. Read synchronized metadata directly;
+        // do not repeat folder/theme filesystem verification for every image.
+        var movie = db.GetStoredMovie(id);
         var source = sources.Active;
         // source_ref is opaque outside its own source, so the source fetches its own poster.
         if (movie?.GetValueOrDefault("source")?.ToString() != source.Name) return NotFound();

@@ -1,8 +1,18 @@
 import { renderHook, waitFor, act } from '@testing-library/react'
 import { describe, it, expect, vi } from 'vitest'
 import { useResource } from '@/lib/useResource'
+import { createElement, StrictMode, type ReactNode } from 'react'
 
 describe('useResource', () => {
+  it('does not duplicate the initial request when StrictMode replays effects', async () => {
+    const fetcher = vi.fn(() => Promise.resolve(['once']))
+    const wrapper = ({ children }: { children: ReactNode }) => createElement(StrictMode, null, children)
+    const { result } = renderHook(() => useResource(fetcher), { wrapper })
+
+    await waitFor(() => expect(result.current.data).toEqual(['once']))
+    expect(fetcher).toHaveBeenCalledTimes(1)
+  })
+
   it('starts loading, then exposes the data', async () => {
     const { result } = renderHook(() => useResource(() => Promise.resolve(['a', 'b'])))
 

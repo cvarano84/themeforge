@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
-import type { MediaItem, MediaStatus } from '@/lib/types'
+import type { MediaItem, MediaStatus, MoviePageQuery } from '@/lib/types'
 import type { MediaAdapter } from '@/lib/media/adapter'
 import { Button, EmptyState, Modal, Spinner } from '@/components/ui'
 import { SearchModal } from './SearchModal'
@@ -11,6 +11,16 @@ interface MediaGridProps {
   onUpdated: (id: string, status: MediaStatus) => void
   /** Context-dependent empty-state copy — the page knows the source, the grid doesn't. */
   emptyDescription: string
+  serverState?: {
+    query: MoviePageQuery
+    total: number
+    totalPages: number
+    statusCounts: Record<string, number>
+    qualities: string[]
+    instances: { id: string; name: string }[]
+    loading: boolean
+    onQueryChange: (patch: Partial<MoviePageQuery>) => void
+  }
 }
 
 type Filter = 'all' | MediaStatus | 'partial' | 'missing' | 'unavailable'
@@ -26,7 +36,7 @@ const STATUS_LABEL: Record<Exclude<Filter, 'all'>, string> = {
   unavailable:'Unavailable',
 }
 
-export function MediaGrid({ items, adapter, onUpdated, emptyDescription }: MediaGridProps) {
+export function MediaGrid({ items, adapter, onUpdated, emptyDescription, serverState }: MediaGridProps) {
   const [filter,   setFilter]   = useState<Filter>('all')
   const [search,   setSearch]   = useState('')
   const [quality,  setQuality]  = useState('all')
@@ -38,10 +48,11 @@ export function MediaGrid({ items, adapter, onUpdated, emptyDescription }: Media
   const [bulkError, setBulkError] = useState('')
 
   const effectiveStatus = (item: MediaItem) => item.aggregateStatus ?? item.status
-  const countOf = (s: Exclude<Filter, 'all'>) => items.filter(i => effectiveStatus(i) === s).length
+  const countOf = (s: Exclude<Filter, 'all'>) => serverState?.statusCounts[s]
+    ?? items.filter(i => effectiveStatus(i) === s).length
   const ignored = countOf('ignored')
 
-  const visible = items.filter(i => {
+  const visible = serverState ? items : items.filter(i => {
     if (filter !== 'all' && effectiveStatus(i) !== filter) return false
     if (filter === 'all' && i.status === 'ignored') return false
     if (search.trim()) {
@@ -52,8 +63,27 @@ export function MediaGrid({ items, adapter, onUpdated, emptyDescription }: Media
     if (instance !== 'all' && !(i.locations ?? []).some(l => l.instanceId === instance)) return false
     return true
   })
-  const qualities = [...new Set(items.flatMap(i => (i.locations ?? []).map(l => l.qualityLabel).filter((x): x is string => !!x)))].sort()
-  const instances = [...new Map(items.flatMap(i => (i.locations ?? []).filter(l => l.instanceId).map(l => [l.instanceId!, l.instanceName ?? l.instanceId!] as const))).entries()]
+  const qualities = serverState?.qualities ?? [...new Set(items.flatMap(i => (i.locations ?? []).map(l => l.qualityLabel).filter((x): x is string => !!x)))].sort()
+  const instances = serverState?.instances.map(i => [i.id, i.name] as const)
+    ?? [...new Map(items.flatMap(i => (i.locations ?? []).filter(l => l.instanceId).map(l => [l.instanceId!, l.instanceName ?? l.instanceId!] as const))).entries()]
+  const allCount = serverState
+    ? Object.entries(serverState.statusCounts).filter(([key]) => key !== 'ignored').reduce((sum, [, value]) => sum + value, 0)
+    : items.length - ignored
+
+  const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  useEffect(() => () => { if (searchTimer.current) clearTimeout(searchTimer.current) }, [])
+
+  function updateSearch(value: string) {
+    setSearch(value)
+    if (!serverState) return
+    if (searchTimer.current) clearTimeout(searchTimer.current)
+    searchTimer.current = setTimeout(() => serverState.onQueryChange({ search: value, page: 1 }), 250)
+  }
+
+  function updateFilter(value: Filter) {
+    setFilter(value)
+    serverState?.onQueryChange({ status: value, page: 1 })
+  }
 
   function toggleSelected(id: string) {
     setSelectedIds(current => {
@@ -97,8 +127,8 @@ export function MediaGrid({ items, adapter, onUpdated, emptyDescription }: Media
     setLimit(BATCH)
   }
 
-  const shown   = visible.slice(0, limit)
-  const hasMore = limit < visible.length
+  const shown   = serverState ? visible : visible.slice(0, limit)
+  const hasMore = !serverState && limit < visible.length
 
   useEffect(() => {
     if (!hasMore) return
@@ -119,11 +149,16 @@ export function MediaGrid({ items, adapter, onUpdated, emptyDescription }: Media
         <div className="-mx-1 overflow-x-auto px-1 pb-1" aria-label="Status filters">
         <div className="flex w-max items-center gap-1 rounded-lg border border-[#1D2939] bg-[#101828] p-1">
           {([
-            ['all', `All (${items.length - ignored})`],
+            ['all', `All (${allCount})`],
             // Driven by the adapter, so shows get a Plex theme chip and movies don't.
             // Ignored still only appears once something is ignored.
-            ...([...adapter.statuses,
-              ...(items.some(i => i.aggregateStatus === 'partial') ? ['partial' as const] : []),
+            ...([...(serverState ? [] : adapter.statuses),
+              ...(serverState && countOf('missing') > 0 ? ['missing' as const] : []),
+              ...(serverState && countOf('downloaded') > 0 ? ['downloaded' as const] : []),
+              ...(serverState && countOf('partial') > 0 ? ['partial' as const] : []),
+              ...(serverState && countOf('unavailable') > 0 ? ['unavailable' as const] : []),
+              ...(serverState && countOf('ignored') > 0 ? ['ignored' as const] : []),
+              ...(!serverState && items.some(i => i.aggregateStatus === 'partial') ? ['partial' as const] : []),
               ...(items.some(i => i.aggregateStatus === 'missing') ? ['missing' as const] : []),
               ...(items.some(i => i.aggregateStatus === 'unavailable') ? ['unavailable' as const] : []),
             ] as Exclude<Filter, 'all'>[])
@@ -132,7 +167,7 @@ export function MediaGrid({ items, adapter, onUpdated, emptyDescription }: Media
           ] as [Filter, string][]).map(([val, label]) => (
             <button
               key={val}
-              onClick={() => setFilter(val)}
+              onClick={() => updateFilter(val)}
               aria-pressed={filter === val}
               className={`min-h-11 whitespace-nowrap rounded-md px-3 py-1.5 text-xs font-medium transition-all
                 ${filter === val
@@ -146,10 +181,10 @@ export function MediaGrid({ items, adapter, onUpdated, emptyDescription }: Media
 
         <div className="flex w-full flex-col gap-2 sm:w-auto sm:flex-row sm:flex-wrap">
           <button type="button" aria-pressed={selectionMode} onClick={() => { setSelectionMode(value => !value); setSelectedIds(new Set()); setBulkError('') }} className="min-h-11 rounded-lg border border-[#344054] bg-[#101828] px-3 text-sm font-semibold text-[#D0D5DD] hover:border-[#667085] hover:text-white">{selectionMode ? 'Cancel selection' : 'Select'}</button>
-          {instances.length > 0 && <select aria-label="Filter by instance" value={instance} onChange={e => setInstance(e.target.value)} className="min-h-11 rounded-lg border border-[#344054] bg-[#101828] px-3 py-2 text-base text-[#D0D5DD] sm:text-xs">
+          {instances.length > 0 && <select aria-label="Filter by instance" value={instance} onChange={e => { setInstance(e.target.value); serverState?.onQueryChange({ instanceId: e.target.value, page: 1 }) }} className="min-h-11 rounded-lg border border-[#344054] bg-[#101828] px-3 py-2 text-base text-[#D0D5DD] sm:text-xs">
             <option value="all">All instances</option>{instances.map(([id, name]) => <option key={id} value={id}>{name}</option>)}
           </select>}
-          {qualities.length > 0 && <select aria-label="Filter by quality" value={quality} onChange={e => setQuality(e.target.value)} className="min-h-11 rounded-lg border border-[#344054] bg-[#101828] px-3 py-2 text-base text-[#D0D5DD] sm:text-xs">
+          {qualities.length > 0 && <select aria-label="Filter by quality" value={quality} onChange={e => { setQuality(e.target.value); serverState?.onQueryChange({ quality: e.target.value, page: 1 }) }} className="min-h-11 rounded-lg border border-[#344054] bg-[#101828] px-3 py-2 text-base text-[#D0D5DD] sm:text-xs">
             <option value="all">All qualities</option>{qualities.map(label => <option key={label}>{label}</option>)}
           </select>}
         <div className="relative min-w-0 flex-1 sm:w-56">
@@ -158,7 +193,7 @@ export function MediaGrid({ items, adapter, onUpdated, emptyDescription }: Media
           </svg>
           <input
             value={search}
-            onChange={e => setSearch(e.target.value)}
+            onChange={e => updateSearch(e.target.value)}
             placeholder={adapter.labels.searchPlaceholder}
             aria-label={`Search ${adapter.labels.plural}`}
             inputMode="search"
@@ -167,6 +202,22 @@ export function MediaGrid({ items, adapter, onUpdated, emptyDescription }: Media
         </div>
         </div>
       </div>
+
+      {serverState && <div className="mb-5 flex flex-wrap items-center gap-2 text-xs text-[#98A2B3]">
+        <label className="flex items-center gap-2">Sort
+          <select aria-label="Sort movies" value={serverState.query.sort ?? 'title'} onChange={e => serverState.onQueryChange({ sort: e.target.value as MoviePageQuery['sort'], page: 1 })} className="min-h-10 rounded-lg border border-[#344054] bg-[#101828] px-3 text-xs text-[#D0D5DD]">
+            <option value="title">Title</option><option value="year">Year</option><option value="status">Status</option><option value="syncedAt">Recently synced</option>
+          </select>
+        </label>
+        <button type="button" onClick={() => serverState.onQueryChange({ direction: serverState.query.direction === 'desc' ? 'asc' : 'desc', page: 1 })} className="min-h-10 rounded-lg border border-[#344054] bg-[#101828] px-3 text-[#D0D5DD]">
+          {serverState.query.direction === 'desc' ? 'Descending' : 'Ascending'}
+        </button>
+        <label className="ml-auto flex items-center gap-2">Per page
+          <select aria-label="Movies per page" value={serverState.query.pageSize ?? 50} onChange={e => serverState.onQueryChange({ pageSize: Number(e.target.value) as 25 | 50 | 100, page: 1 })} className="min-h-10 rounded-lg border border-[#344054] bg-[#101828] px-3 text-xs text-[#D0D5DD]">
+            <option value={25}>25</option><option value={50}>50</option><option value={100}>100</option>
+          </select>
+        </label>
+      </div>}
 
       {/* Grid */}
       {visible.length === 0 ? (
@@ -198,6 +249,11 @@ export function MediaGrid({ items, adapter, onUpdated, emptyDescription }: Media
               Loading more… ({shown.length} of {visible.length})
             </div>
           )}
+          {serverState && serverState.totalPages > 1 && <nav aria-label="Movie pages" className="mt-6 flex items-center justify-center gap-3">
+            <Button variant="secondary" size="sm" disabled={(serverState.query.page ?? 1) <= 1 || serverState.loading} onClick={() => serverState.onQueryChange({ page: Math.max(1, (serverState.query.page ?? 1) - 1) })}>Previous</Button>
+            <span className="text-xs tabular-nums text-[#98A2B3]">Page {serverState.query.page ?? 1} of {serverState.totalPages}</span>
+            <Button variant="secondary" size="sm" disabled={(serverState.query.page ?? 1) >= serverState.totalPages || serverState.loading} onClick={() => serverState.onQueryChange({ page: (serverState.query.page ?? 1) + 1 })}>Next</Button>
+          </nav>}
         </>
       )}
 

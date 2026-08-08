@@ -71,7 +71,7 @@ public class AutoDownloadService(
             lastTickResult = Tick.Result,
             ticksCompleted = _ticksCompleted,
             downloadsStarted = _downloadsStarted,
-            pendingCount = db.GetAllMovies().Count(m => (m["status"]?.ToString() ?? "") == "pending"),
+            pendingCount = db.GetStoredPendingMovieCount(),
             cooldowns = _cooldownUntil
                                    .OrderBy(kv => kv.Value)
                                    .ToDictionary(kv => kv.Key, kv => kv.Value),

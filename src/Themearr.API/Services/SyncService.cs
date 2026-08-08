@@ -128,6 +128,13 @@ public class SyncService(
                 AddLog($"Theme reconciliation: {reconciliation.Copied} copied, " +
                     $"{reconciliation.Missing} still pending, {reconciliation.Failed} failed");
             }
+            else
+            {
+                // Plex has no cross-instance copy work, but its persisted theme state
+                // still needs refreshing after imports. Keep that filesystem pass in the
+                // background sync so read-only page requests remain independent of disk.
+                _themeReconciler.RefreshStoredMovieStatuses(AddLog);
+            }
 
             AddLog($"Sync complete. {movies.Count} movies available locally.");
         }

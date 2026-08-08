@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Threading.RateLimiting;
 using Themearr.API.Data;
 using Themearr.API.Services;
@@ -162,6 +163,40 @@ app.Use(async (ctx, next) =>
 });
 
 app.UseRateLimiter();
+
+// Lightweight timing for the three navigation-critical local-read endpoints. Debug
+// logging provides normal measurements without production log spam; requests over one
+// second are always warnings so regressions remain visible. Server-Timing also makes the
+// backend duration inspectable in browser developer tools.
+app.Use(async (ctx, next) =>
+{
+    var path = ctx.Request.Path;
+    var tracked = path.StartsWithSegments("/api/stats")
+        || path.Equals("/api/movies", StringComparison.OrdinalIgnoreCase)
+        || path.Equals("/api/queue", StringComparison.OrdinalIgnoreCase);
+    if (!tracked)
+    {
+        await next();
+        return;
+    }
+
+    var timer = Stopwatch.StartNew();
+    ctx.Response.OnStarting(() =>
+    {
+        ctx.Response.Headers["Server-Timing"] = $"app;dur={timer.Elapsed.TotalMilliseconds:0.0}";
+        return Task.CompletedTask;
+    });
+    await next();
+    timer.Stop();
+    var elapsedMs = timer.Elapsed.TotalMilliseconds;
+    var perfLog = ctx.RequestServices.GetRequiredService<ILoggerFactory>().CreateLogger("Performance");
+    if (elapsedMs >= 1000)
+        perfLog.LogWarning("[PERF] Slow request {Method} {Path}: {ElapsedMs:F1} ms",
+            ctx.Request.Method, ctx.Request.Path, elapsedMs);
+    else
+        perfLog.LogDebug("[PERF] {Method} {Path}: {ElapsedMs:F1} ms",
+            ctx.Request.Method, ctx.Request.Path, elapsedMs);
+});
 
 if (app.Environment.IsDevelopment()) app.UseCors();
 

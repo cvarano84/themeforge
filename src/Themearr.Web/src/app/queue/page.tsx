@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
-import { settingsApi } from '@/lib/api'
+import { queueApi, settingsApi } from '@/lib/api'
 import type { MediaItem, YoutubeResult } from '@/lib/types'
 import { AppShell } from '@/components/layout/AppShell'
 import { Button, EmptyState, ErrorIcon, Input, Spinner } from '@/components/ui'
@@ -41,6 +41,9 @@ export default function QueuePage() {
   const [downloadLogs,  setDownloadLogs]  = useState<string[]>([])
   const [autoMode,      setAutoMode]      = useState(false)
   const [savingAuto,    setSavingAuto]    = useState(false)
+  const [queueTotal, setQueueTotal] = useState(0)
+  const [queueHasMore, setQueueHasMore] = useState(false)
+  const [queueItems, setQueueItems] = useState<MediaItem[] | null>(null)
 
   // Holds the movieId being downloaded so the polling closure keeps the right id
   const downloadingMovieId = useRef<string | null>(null)
@@ -52,11 +55,28 @@ export default function QueuePage() {
 
   // The initial load. Routed through useResource so a failed request surfaces
   // as an error screen instead of "every movie already has a theme".
-  const { data: movies, error: moviesError, retry: retryMovies } = useResource(useCallback(() => adapter.list(), [adapter]))
+  const loadQueue = useCallback(async () => {
+    if (media === 'movies') {
+      const result = await queueApi.page(1, 50)
+      setQueueTotal(result.total)
+      setQueueHasMore(result.total > result.items.length)
+      setQueueItems(result.items)
+      return result.items as MediaItem[]
+    }
+    const items = await adapter.list()
+    setQueueTotal(items.filter(item => item.status === 'pending').length)
+    setQueueHasMore(false)
+    setQueueItems(items)
+    return items
+  }, [adapter, media])
+  const { error: moviesError, retry: retryMovies } = useResource(loadQueue)
+  const movies = queueItems
   // 'pending' only — a plexTheme show is not outstanding work, which matches
   // GetPendingShows filtering on plex_has_theme = 0. Manual triage and the
   // auto-download worker therefore agree on what is left to do.
-  const pending = movies ? movies.filter(m => m.status === 'pending') : null
+  const pending = movies ? movies.filter(m => media === 'movies'
+    ? (m.aggregateStatus === 'missing' || m.aggregateStatus === 'partial' || m.status === 'pending')
+    : m.status === 'pending') : null
 
   // useResource only refetches when retry() bumps its attempt counter — handing it a new
   // fetcher identity is not enough — so switching media has to ask for the reload
@@ -64,6 +84,8 @@ export default function QueuePage() {
   function switchMedia(next: 'movies' | 'shows') {
     if (next === media) return
     setMedia(next)
+    setQueueItems(null)
+    setQueueHasMore(false)
     setCurrentIdx(0)
     setResults([])
     setError('')
@@ -74,7 +96,26 @@ export default function QueuePage() {
   }
 
   const current   = pending?.[currentIdx] ?? null
-  const remaining = pending ? Math.max(0, pending.length - currentIdx) : 0
+  const remaining = pending ? Math.max(0, queueTotal - currentIdx) : 0
+
+  // Fetch the next bounded queue page before the current one is exhausted. Completed or
+  // ignored jobs leave local state immediately; historical data is never part of this
+  // payload.
+  const loadingNextPage = useRef(false)
+  useEffect(() => {
+    if (media !== 'movies' || !pending || loadingNextPage.current) return
+    if (!queueHasMore || currentIdx < pending.length - 5) return
+    loadingNextPage.current = true
+    const processedIds = pending.slice(0, currentIdx).map(item => item.id)
+    queueApi.page(1, 50, processedIds)
+      .then(result => {
+        setQueueHasMore(result.total > result.items.length)
+        setQueueItems(current => current
+          ? [...current, ...result.items.filter(item => !current.some(existing => existing.id === item.id))]
+          : result.items)
+      })
+      .finally(() => { loadingNextPage.current = false })
+  }, [media, pending, queueHasMore, currentIdx])
 
   // ── Load auto mode setting ──────────────────────────────────────────────────
   useEffect(() => {

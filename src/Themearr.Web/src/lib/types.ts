@@ -14,6 +14,29 @@ export interface Movie {
   locations?: MediaLocation[]
 }
 
+export interface MoviePage {
+  items: Movie[]
+  page: number
+  pageSize: number
+  total: number
+  totalPages: number
+  statusCounts: Record<string, number>
+  qualities: string[]
+  instances: { id: string; name: string }[]
+  lastSyncedAt: string | null
+}
+
+export interface MoviePageQuery {
+  page?: number
+  pageSize?: 25 | 50 | 100
+  search?: string
+  status?: string
+  instanceId?: string
+  quality?: string
+  sort?: 'title' | 'year' | 'status' | 'syncedAt'
+  direction?: 'asc' | 'desc'
+}
+
 export interface YoutubeResult {
   videoId: string
   title: string
@@ -165,6 +188,9 @@ export interface DashboardStats {
   recentActivity: HistoryEntry[]
   recentlyAdded: { id: string; title: string; year: number | null; syncedAt: string | null; posterUrl: string | null }[]
 }
+
+export type DashboardSummary = Omit<DashboardStats, 'recentActivity' | 'recentlyAdded'>
+export type DashboardActivity = Pick<DashboardStats, 'recentActivity' | 'recentlyAdded'>
 
 export interface VersionInfo {
   current: string

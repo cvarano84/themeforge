@@ -12,6 +12,45 @@ export function makeApiMock() {
   const group = (...methods: string[]) =>
     Object.fromEntries(methods.map(m => [m, vi.fn()])) as Record<string, ReturnType<typeof vi.fn>>
 
+  const moviesApi = group(
+    'page', 'list', 'search', 'download', 'downloadUrl', 'downloadStatus', 'autoDownload',
+    'deleteTheme', 'ignoreMovie', 'unignoreMovie', 'themeAudioObjectUrl',
+  )
+  const asPage = (items: Array<{ status?: string; aggregateStatus?: string; locations?: Array<{ qualityLabel?: string | null; instanceId?: string | null; instanceName?: string | null }> }> = []) => {
+    const statusCounts: Record<string, number> = {}
+    items.forEach(item => {
+      const status = item.aggregateStatus ?? (item.status === 'pending' ? 'missing' : item.status ?? 'missing')
+      statusCounts[status] = (statusCounts[status] ?? 0) + 1
+    })
+    return {
+      items, page: 1, pageSize: 50, total: items.filter(item => item.status !== 'ignored').length,
+      totalPages: items.length ? 1 : 0, statusCounts,
+      qualities: [...new Set(items.flatMap(item => item.locations?.map(location => location.qualityLabel).filter(Boolean) ?? []))],
+      instances: [], lastSyncedAt: null,
+    }
+  }
+  const mockedMovieList = moviesApi.list as unknown as () => Promise<Array<{ status?: string; aggregateStatus?: string }> | undefined>
+  moviesApi.page.mockImplementation(async () => asPage((await mockedMovieList()) ?? []))
+  const queueApi = group('page')
+  queueApi.page.mockImplementation(async () => {
+    const items = ((await mockedMovieList()) ?? []).filter((item: { status?: string; aggregateStatus?: string }) =>
+      item.status === 'pending' || item.aggregateStatus === 'missing')
+    return asPage(items)
+  })
+  const statsApi = group('get', 'summary', 'activity')
+  const mockedStatsGet = statsApi.get as unknown as () => Promise<Record<string, unknown>>
+  statsApi.summary.mockImplementation(async () => {
+    const stats = await mockedStatsGet()
+    return {
+      total: stats.total, downloaded: stats.downloaded, pending: stats.pending,
+      ignored: stats.ignored, coverage: stats.coverage, addedThisWeek: stats.addedThisWeek,
+    }
+  })
+  statsApi.activity.mockImplementation(async () => {
+    const stats = await mockedStatsGet()
+    return { recentActivity: stats.recentActivity, recentlyAdded: stats.recentlyAdded }
+  })
+
   return {
     getAuthToken: () => 'test-token',
     setAuthToken: vi.fn(),
@@ -22,10 +61,8 @@ export function makeApiMock() {
       'status', 'startPlexLogin', 'plexLoginStatus', 'plexServers', 'plexLibraries',
       'logout', 'saveSelection', 'reset', 'complete',
     ),
-    moviesApi: group(
-      'list', 'search', 'download', 'downloadUrl', 'downloadStatus', 'autoDownload',
-      'deleteTheme', 'ignoreMovie', 'unignoreMovie', 'themeAudioObjectUrl',
-    ),
+    moviesApi,
+    queueApi,
     showsApi: group(
       'list', 'search', 'download', 'downloadUrl', 'downloadStatus',
       'deleteTheme', 'ignoreShow', 'unignoreShow', 'stats', 'themeAudioObjectUrl',
@@ -52,7 +89,7 @@ export function makeApiMock() {
       test: vi.fn(),
     },
     youtubeCookiesApi: group('get', 'upload', 'delete'),
-    statsApi: group('get'),
+    statsApi,
     versionApi: group('get', 'refresh', 'update', 'updateStatus'),
     systemApi: group('health', 'tasks', 'runTask'),
     radarrApi: group('get', 'save', 'test'),

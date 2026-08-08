@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { moviesApi, radarrApi, syncApi } from '@/lib/api'
-import type { MediaStatus, Movie, SyncStatus } from '@/lib/types'
+import type { MediaStatus, Movie, MoviePage, MoviePageQuery, SyncStatus } from '@/lib/types'
 import { AppShell } from '@/components/layout/AppShell'
 import { MediaGrid } from '@/components/media/MediaGrid'
 import { moviesAdapter } from '@/lib/media/adapter'
@@ -9,6 +9,9 @@ import { useResource } from '@/lib/useResource'
 
 export default function MoviesPage() {
   const [movies, setMovies]   = useState<Movie[]>([])
+  const [pageData, setPageData] = useState<MoviePage | null>(null)
+  const [query, setQuery] = useState<MoviePageQuery>({ page: 1, pageSize: 50, sort: 'title', direction: 'asc', status: 'all' })
+  const [pageLoading, setPageLoading] = useState(false)
   const [sync, setSync]       = useState<SyncStatus | null>(null)
   const [syncing, setSyncing] = useState(false)
   const [source, setSource]   = useState<'plex' | 'radarr' | 'disabled'>('plex')
@@ -43,16 +46,17 @@ export default function MoviesPage() {
   const loadMovies = useCallback(async () => {
     const mine = ++loadSeq.current
     try {
-      const list = await moviesApi.list()
+      const result = await moviesApi.page(query)
       if (mine !== loadSeq.current) return
-      setMovies(list)
+      setMovies(result.items)
+      setPageData(result)
       setHasData(true)
       setRefreshError(null)
     } catch (e) {
       if (mine !== loadSeq.current) return
       setRefreshError(e instanceof Error && e.message ? e.message : 'Request failed')
     }
-  }, [])
+  }, [query])
 
   // The Retry buttons on a failed refresh, wrapping `loadMovies` so repeated
   // clicks can't put several `GET /api/movies` in flight at once -- there's no
@@ -84,19 +88,29 @@ export default function MoviesPage() {
   // auto-sync when the library comes back genuinely empty -- done here, inside
   // the fetcher, rather than in a second effect derived from the result.
   const loadInitialMovies = useCallback(async () => {
-    const list = await moviesApi.list()
-    setMovies(list)
+    const result = await moviesApi.page(query)
+    setMovies(result.items)
+    setPageData(result)
     setHasData(true)
     // This load just succeeded, so any earlier refresh failure is stale news.
     // Left set, it would report a confirmed-empty library as a failed refresh.
     setRefreshError(null)
-    if (list.length === 0) {
+    if (result.total === 0) {
       setSyncing(true)
       syncApi.start().catch(() => setSyncing(false))
     }
-    return list
-  }, [])
+    return result.items
+  }, []) // initial query is intentionally fixed; subsequent query changes use the effect below
   const { error: moviesError, retry: retryMovies } = useResource(loadInitialMovies)
+
+  const lastQueryKey = useRef(JSON.stringify(query))
+  useEffect(() => {
+    const key = JSON.stringify(query)
+    if (lastQueryKey.current === key) return
+    lastQueryKey.current = key
+    setPageLoading(true)
+    loadMovies().finally(() => setPageLoading(false))
+  }, [query, loadMovies])
 
   // Learn the active library source so the sync control doesn't hardcode "Plex".
   useEffect(() => {
@@ -137,8 +151,11 @@ export default function MoviesPage() {
     setMovies(prev => prev.map(m => m.id === id ? { ...m, status: status as Movie['status'] } : m))
   }
 
-  const pending    = movies.filter(m => m.status === 'pending').length
-  const downloaded = movies.filter(m => m.status === 'downloaded').length
+  const pending    = (pageData?.statusCounts.missing ?? 0) + (pageData?.statusCounts.partial ?? 0)
+  const downloaded = pageData?.statusCounts.downloaded ?? 0
+  const total = pageData
+    ? Object.entries(pageData.statusCounts).filter(([key]) => key !== 'ignored').reduce((sum, [, value]) => sum + value, 0)
+    : 0
   const sourceLabel = source === 'radarr' ? 'Radarr' : source === 'disabled' ? 'disabled' : 'Plex'
 
   return (
@@ -151,10 +168,10 @@ export default function MoviesPage() {
       }
     >
       {/* Stats row */}
-      {movies.length > 0 && (
+      {pageData && total > 0 && (
         <section aria-label="Movie library statistics" className="mb-5 grid grid-cols-1 gap-3 min-[360px]:grid-cols-3">
           {[
-            { label: 'Total',      value: movies.length, color: '#98A2B3' },
+            { label: 'Total',      value: total,         color: '#98A2B3' },
             { label: 'Downloaded', value: downloaded,    color: '#12B76A' },
             { label: 'Pending',    value: pending,       color: '#F79009' },
           ].map(({ label, value, color }) => (
@@ -228,6 +245,16 @@ export default function MoviesPage() {
             adapter={moviesAdapter}
             onUpdated={handleMovieUpdated}
             emptyDescription={`Sync your ${sourceLabel} library to get started`}
+            serverState={{
+              query,
+              total: pageData?.total ?? 0,
+              totalPages: pageData?.totalPages ?? 0,
+              statusCounts: pageData?.statusCounts ?? {},
+              qualities: pageData?.qualities ?? [],
+              instances: pageData?.instances ?? [],
+              loading: pageLoading,
+              onQueryChange: patch => setQuery(current => ({ ...current, ...patch })),
+            }}
           />
         </>
       )}

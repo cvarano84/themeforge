@@ -4,7 +4,8 @@ import type {
   HealthResponse, SystemTask, RadarrSettings, SonarrSettings, ApiKey, Show, ShowStats,
   DownloaderDiagnostics, DownloaderTestResult, PathMapping, PathMappingTestResult, PathRepairResult,
   YoutubeCookieStatus,
-  ArrInstance, ArrInstanceInput,
+  ArrInstance, ArrInstanceInput, MoviePage, MoviePageQuery,
+  DashboardSummary, DashboardActivity,
 } from './types'
 import { brandAsset } from './brand'
 
@@ -142,8 +143,21 @@ export const setupApi = {
 
 // ── Movies ────────────────────────────────────────────────────────────────────
 
+function getMoviePage(query: MoviePageQuery = {}) {
+  const params = new URLSearchParams()
+  Object.entries(query).forEach(([key, value]) => {
+    if (value !== undefined && value !== '' && value !== 'all') params.set(key, String(value))
+  })
+  const suffix = params.size ? `?${params.toString()}` : ''
+  return request<MoviePage>(`/api/movies${suffix}`)
+}
+
 export const moviesApi = {
-  list: () => request<Movie[]>('/api/movies'),
+  page: getMoviePage,
+
+  // Compatibility for the shared media adapter. New movie list views should use page()
+  // so totals, filters and navigation remain server-side.
+  list: async () => (await getMoviePage()).items,
 
   search: (movieId: string, q?: string) =>
     request<{ movie: Movie; results: YoutubeResult[] }>(
@@ -196,6 +210,13 @@ export const moviesApi = {
     if (!res.ok) throw new Error(`Audio fetch failed (${res.status})`)
     const blob = await res.blob()
     return URL.createObjectURL(blob)
+  },
+}
+
+export const queueApi = {
+  page: (page = 1, pageSize: 25 | 50 | 100 = 50, excludeIds: string[] = []) => {
+    const excluded = excludeIds.length ? `&exclude=${encodeURIComponent(excludeIds.join(','))}` : ''
+    return request<MoviePage>(`/api/queue?media=movies&page=${page}&pageSize=${pageSize}${excluded}`)
   },
 }
 
@@ -314,6 +335,8 @@ export const youtubeCookiesApi = {
 
 export const statsApi = {
   get: () => request<DashboardStats>('/api/stats'),
+  summary: () => request<DashboardSummary>('/api/stats/summary'),
+  activity: () => request<DashboardActivity>('/api/stats/activity'),
 }
 
 // ── Version / update ──────────────────────────────────────────────────────────

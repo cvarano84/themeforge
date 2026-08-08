@@ -15,9 +15,44 @@ public class MoviesController(
     private readonly LocalFolderResolver _folders = new(db);
 
     [HttpGet("movies")]
-    public IActionResult ListMovies()
+    public IActionResult ListMovies(
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 50,
+        [FromQuery] string? search = null,
+        [FromQuery] string? status = null,
+        [FromQuery] string? instanceId = null,
+        [FromQuery] string? quality = null,
+        [FromQuery] string? sort = "title",
+        [FromQuery] string? direction = "asc")
     {
-        var movies = MediaGrouping.Group(db.GetAllMovies(), db.GetArrInstances(), shows: false);
+        var result = db.GetMoviePage(page, pageSize, search, status, instanceId, quality, sort, direction);
+        AttachPosterUrls(result.Items);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// The manual triage queue is a filtered movie page, not the complete library or
+    /// download history. Keeping it separate lets the client request only active work.
+    /// </summary>
+    [HttpGet("queue")]
+    public IActionResult ListQueue(
+        [FromQuery] int page = 1,
+        [FromQuery] int pageSize = 50,
+        [FromQuery] string media = "movies",
+        [FromQuery] string? exclude = null)
+    {
+        if (!string.Equals(media, "movies", StringComparison.OrdinalIgnoreCase))
+            return BadRequest(new { detail = "Only the movie queue is available from this endpoint." });
+
+        var excludedIds = (exclude ?? "").Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        var result = db.GetMoviePage(page, pageSize, status: "outstanding", sort: "syncedAt", direction: "desc",
+            excludeIds: excludedIds);
+        AttachPosterUrls(result.Items);
+        return Ok(result);
+    }
+
+    private void AttachPosterUrls(IEnumerable<Dictionary<string, object?>> movies)
+    {
         var posterExpiry = DateTimeOffset.UtcNow.AddHours(12);
         var activeSource = sources.Active.Name;
         foreach (var movie in movies)
@@ -35,7 +70,6 @@ public class MoviesController(
                 ? posterSigner.PosterPath(id, posterExpiry)
                 : null;
         }
-        return Ok(movies);
     }
 
     [HttpGet("search/{movieId}")]

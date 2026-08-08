@@ -9,6 +9,8 @@ public sealed record ThemeReconciliationResult(
     int Missing,
     int Failed);
 
+public sealed record MovieStatusRefreshResult(int Examined, int Downloaded, int Pending, int Unresolved);
+
 /// <summary>
 /// Reconciles the physical theme state of every Radarr location for one logical movie.
 /// Disk is authoritative: a stored <c>downloaded</c> status never suppresses repair of a
@@ -71,6 +73,51 @@ public sealed class ThemeReconciliationService
                 total.Failed + result.Failed);
         }
         return total;
+    }
+
+    /// <summary>
+    /// Refreshes the persisted status snapshot outside the request lifecycle. This is
+    /// primarily for Plex, whose sync does not need Radarr's cross-location copy logic.
+    /// Reads of Dashboard/Movies/Queue then remain pure database operations.
+    /// </summary>
+    public MovieStatusRefreshResult RefreshStoredMovieStatuses(Action<string>? progress = null)
+    {
+        var rows = _db.GetStoredMovies();
+        var roots = _db.GetTrustedLibraryRoots();
+        var updates = new List<(string Id, string Status)>();
+        var downloaded = 0;
+        var pending = 0;
+        var unresolved = 0;
+
+        foreach (var row in rows)
+        {
+            if (row.GetValueOrDefault("ignored") is true) continue;
+            var id = Value(row, "id");
+            var folder = Value(row, "folderName");
+            string status;
+            if (folder.Length == 0 || !Directory.Exists(folder)
+                || roots.Count > 0 && !ThemeFiles.IsWithinRoots(folder, roots))
+            {
+                status = "unresolved";
+                unresolved++;
+            }
+            else if (ThemeFiles.HasUsableThemeInExistingFolder(folder))
+            {
+                status = "downloaded";
+                downloaded++;
+            }
+            else
+            {
+                status = "pending";
+                pending++;
+            }
+            if (!string.Equals(Value(row, "status"), status, StringComparison.Ordinal))
+                updates.Add((id, status));
+        }
+
+        _db.SetMovieStatuses(updates);
+        progress?.Invoke($"Stored theme status: {downloaded} downloaded, {pending} pending, {unresolved} unresolved");
+        return new MovieStatusRefreshResult(rows.Count, downloaded, pending, unresolved);
     }
 
     public async Task<ThemeReconciliationResult> ReconcileMovieAsync(
